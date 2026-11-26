@@ -3,5 +3,5 @@
 export const PUBLIC_APP_URL =
   (typeof import.meta !== "undefined" && import.meta.env?.["VITE_PUBLIC_APP_URL"]) ||
   process.env?.["PUBLIC_APP_URL"] ||
-  "https://zapatendi.lovable.app";
+  "https://agencia-zapcomia.nisqla.easypanel.host";
 export const webhookUrl = (secret: string) => `${PUBLIC_APP_URL}/api/public/wapi/${secret}`;
