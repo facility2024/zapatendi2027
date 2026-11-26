@@ -121,9 +121,20 @@ describe("anti-refusal filter", () => {
     expect(isRefusal("Isso vai contra as minhas diretrizes.")).toBe(true);
   });
 
+  it("detects corporate deflection (the screenshot case)", () => {
+    expect(
+      isRefusal(
+        "Entendo que não esteja satisfeita. Estou aqui para ajudar da melhor forma possível. Se houver algo mais que eu possa fazer por você, por favor, me avise.",
+      ),
+    ).toBe(true);
+    expect(isRefusal("Vamos manter a conversa respeitosa.")).toBe(true);
+    expect(isRefusal("Esse conteúdo é inapropriado para este canal.")).toBe(true);
+  });
+
   it("does not flag normal replies or long messages", () => {
     expect(isRefusal("Olá! O preço é R$ 50, posso enviar o link?")).toBe(false);
     expect(isRefusal("não posso ajudar " + "x".repeat(400))).toBe(false);
+    expect(isRefusal("Oi! Bora trocar uma ideia sobre o que você gosta?")).toBe(false);
   });
 
   const okJson = (content: string) =>
