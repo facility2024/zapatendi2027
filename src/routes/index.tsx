@@ -8,15 +8,30 @@ import { Panel } from "@/components/app/Panel";
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
-      { title: "zaphot" },
+      { title: "zapcomia" },
       {
         name: "description",
-        content: "Painel para configurar atendimento com IA, áudio e mídia no WhatsApp.",
+        content:
+          "Tenha o melhor sistema de gerar seus agentes persuasivos de vendas com resposta de áudio e interação humanizada.",
       },
-      { property: "og:title", content: "ZapHot" },
-      { property: "og:description", content: "Atendimento com IA no WhatsApp." },
+      { property: "og:title", content: "zapcomia" },
+      {
+        property: "og:description",
+        content:
+          "Tenha o melhor sistema de gerar seus agentes persuasivos de vendas com resposta de áudio e interação humanizada.",
+      },
       { property: "og:type", content: "website" },
+      {
+        property: "og:image",
+        content:
+          "https://COCONUDIMUDIAL.b-cdn.net/AGENCIA%20FACILITY/Rob%C3%B4%20IA%20ZapcomIA%20Neon.png",
+      },
       { name: "twitter:card", content: "summary_large_image" },
+      {
+        name: "twitter:image",
+        content:
+          "https://COCONUDIMUDIAL.b-cdn.net/AGENCIA%20FACILITY/Rob%C3%B4%20IA%20ZapcomIA%20Neon.png",
+      },
     ],
   }),
   component: Index,
