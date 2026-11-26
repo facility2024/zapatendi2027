@@ -10,6 +10,9 @@
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
 export default defineConfig({
+  // Easypanel/Docker run Node, not Cloudflare Workers — pin the Node preset
+  // so `node .output/server/index.mjs` serves the app on PORT (default 3000).
+  nitro: { preset: "node-server" },
   tanstackStart: {
     // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
     // nitro/vite builds from this
