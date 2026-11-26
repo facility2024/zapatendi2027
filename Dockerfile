@@ -3,18 +3,10 @@ FROM oven/bun:1 AS builder
 WORKDIR /app
 COPY package.json bun.lock bunfig.toml ./
 RUN bun install --frozen-lockfile
+# .env.production (committed, public values only) is the single source for
+# VITE_* at build time. Do NOT declare ARG/ENV VITE_* here: an empty ENV
+# overrides .env.production and the client bundle loses Supabase config.
 COPY . .
-
-# Build-time public URL used by the W-API webhook (set as build arg in Easypanel)
-ARG VITE_PUBLIC_APP_URL
-ENV VITE_PUBLIC_APP_URL=$VITE_PUBLIC_APP_URL
-# Supabase public values are baked into the client bundle at build time
-ARG VITE_SUPABASE_URL
-ARG VITE_SUPABASE_PUBLISHABLE_KEY
-ARG VITE_SUPABASE_PROJECT_ID
-ENV VITE_SUPABASE_URL=$VITE_SUPABASE_URL \
-    VITE_SUPABASE_PUBLISHABLE_KEY=$VITE_SUPABASE_PUBLISHABLE_KEY \
-    VITE_SUPABASE_PROJECT_ID=$VITE_SUPABASE_PROJECT_ID
 
 RUN bun run build
 
