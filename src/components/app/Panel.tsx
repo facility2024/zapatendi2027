@@ -8,6 +8,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
+import { Slider } from "@/components/ui/slider";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
 import {
@@ -32,7 +34,9 @@ import {
   getQrCode,
   setupWebhook,
   testAi,
+  testAiSequence,
   testWhatsapp,
+  type SeqStep,
 } from "@/lib/bot.functions";
 import { webhookUrl } from "@/lib/site";
 import { keepQr } from "@/lib/qr";
@@ -269,6 +273,7 @@ export function Panel({ userId, email }: { userId: string; email: string }) {
           <TabsTrigger value="ia">Chaves de IA</TabsTrigger>
           <TabsTrigger value="treino">Treinamento</TabsTrigger>
           <TabsTrigger value="audio">Áudio</TabsTrigger>
+          <TabsTrigger value="comunic">Comunicação</TabsTrigger>
           <TabsTrigger value="teste">Testes</TabsTrigger>
           {data.admin && <TabsTrigger value="admin">Admin</TabsTrigger>}
         </TabsList>
@@ -525,6 +530,10 @@ export function Panel({ userId, email }: { userId: string; email: string }) {
           </Card>
         </TabsContent>
 
+        <TabsContent value="comunic">
+          <ComunicConfig cfg={cfg} set={set} save={save} />
+        </TabsContent>
+
         <TabsContent value="teste">
           <Card>
             <div className="space-y-1.5">
@@ -650,5 +659,170 @@ function TestRow({
         )}
       </Button>
     </div>
+  );
+}
+
+function ComunicConfig({
+  cfg,
+  set,
+  save,
+}: {
+  cfg: Cfg;
+  set: <K extends keyof Cfg>(k: K, v: Cfg[K]) => void;
+  save: () => Promise<void>;
+}) {
+  const seqFn = useServerFn(testAiSequence);
+  const [testing, setTesting] = useState(false);
+  const [steps, setSteps] = useState<SeqStep[] | null>(null);
+  const mode = (cfg.audio_mode ?? "text") as "text" | "auto" | "frequency";
+  const delayOn = cfg.delay_enabled ?? false;
+  const delaySec = cfg.delay_seconds ?? 5;
+  const freq = cfg.audio_frequency ?? 3;
+
+  async function runSeq() {
+    setTesting(true);
+    setSteps(null);
+    try {
+      const r = await seqFn();
+      if (r?.ok) {
+        setSteps(r.steps);
+        toast.success(r.msg);
+      } else {
+        toast.error(r?.msg ?? "Falha no teste");
+      }
+    } catch {
+      toast.error("Falha no teste de sequência");
+    } finally {
+      setTesting(false);
+    }
+  }
+
+  return (
+    <Card>
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-semibold">Configurações de comunicação da IA</h2>
+        <span
+          className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${delayOn ? "bg-success/15 text-success" : "bg-muted text-muted-foreground"}`}
+        >
+          {delayOn ? "Ativo" : "Inativo"}
+        </span>
+      </div>
+
+      <div className="space-y-4 rounded-xl border p-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="font-medium">Intervalo entre mensagens</p>
+            <p className="text-sm text-muted-foreground">Ativar delay automático</p>
+          </div>
+          <Switch
+            checked={delayOn}
+            onCheckedChange={(v) => set("delay_enabled", v)}
+            aria-label="Ativar delay automático"
+          />
+        </div>
+        <div className="space-y-2">
+          <p className="text-2xl font-bold">{delaySec} segundos</p>
+          <Slider
+            value={[delaySec]}
+            min={1}
+            max={30}
+            step={1}
+            disabled={!delayOn}
+            onValueChange={([v]) => set("delay_seconds", v ?? 5)}
+            aria-label="Segundos entre mensagens"
+          />
+          <p className="text-xs text-muted-foreground">
+            Tempo de espera entre cada mensagem enviada.
+          </p>
+        </div>
+      </div>
+
+      <div className="space-y-3 rounded-xl border p-4">
+        <p className="font-medium">Respostas em áudio</p>
+        <RadioGroup
+          value={mode}
+          onValueChange={(v) => set("audio_mode", v as "text" | "auto" | "frequency")}
+        >
+          <label className="flex cursor-pointer items-center gap-2">
+            <RadioGroupItem value="text" /> Somente texto
+          </label>
+          <label className="flex cursor-pointer items-center gap-2">
+            <RadioGroupItem value="auto" /> Texto e áudio automático
+          </label>
+          <label className="flex cursor-pointer items-center gap-2">
+            <RadioGroupItem value="frequency" /> Áudio conforme frequência
+          </label>
+        </RadioGroup>
+        <p className="text-xs text-muted-foreground">
+          Provedor de áudio: <span className="font-semibold text-success">Fish Audio</span> —
+          marcações [soft], [pause], [emphasis] são preservadas na narração.
+        </p>
+      </div>
+
+      {mode === "frequency" && (
+        <div className="space-y-3 rounded-xl border p-4">
+          <div className="space-y-2">
+            <p className="font-medium">Quantidade de mensagens recebidas</p>
+            <p className="text-2xl font-bold">{freq} mensagens</p>
+            <Slider
+              value={[freq]}
+              min={1}
+              max={10}
+              step={1}
+              onValueChange={([v]) => set("audio_frequency", v ?? 3)}
+              aria-label="Frequência de áudio"
+            />
+            <p className="text-xs text-muted-foreground">
+              Após essa quantidade de mensagens recebidas, a próxima resposta poderá ser em áudio.
+            </p>
+          </div>
+          <label className="flex items-center justify-between rounded-lg border p-3">
+            <span className="text-sm">Permitir pedido direto de áudio pelo cliente</span>
+            <Switch
+              checked={cfg.allow_audio_request ?? true}
+              onCheckedChange={(v) => set("allow_audio_request", v)}
+            />
+          </label>
+        </div>
+      )}
+
+      <div className="flex flex-wrap gap-2">
+        <Button onClick={() => save()}>Salvar configurações</Button>
+        <Button variant="secondary" disabled={testing} onClick={runSeq}>
+          {testing ? (
+            <>
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Testando…
+            </>
+          ) : (
+            "TESTAR ENVIO DA IA"
+          )}
+        </Button>
+      </div>
+
+      {steps && (
+        <div className="space-y-1.5 rounded-xl border bg-muted/40 p-4 font-mono text-xs">
+          <p className="font-sans text-sm font-semibold">Resultado da sequência</p>
+          {steps.map((s, i) => (
+            <div key={i} className="flex flex-wrap gap-2">
+              <span className="text-muted-foreground">{new Date(s.at).toLocaleTimeString()}</span>
+              <span className={s.ok === false ? "text-destructive" : "text-foreground"}>
+                {s.step}
+              </span>
+              {s.waitedMs !== undefined && (
+                <span className={s.ok ? "text-success" : "text-destructive"}>
+                  espera {Math.round(s.waitedMs / 1000)}s
+                  {s.expectedMs !== undefined
+                    ? ` / esperado ${Math.round(s.expectedMs / 1000)}s`
+                    : ""}
+                  {s.ok ? " ✓" : " ✗"}
+                </span>
+              )}
+              {s.detail && <span className="text-muted-foreground">— {s.detail}</span>}
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
   );
 }

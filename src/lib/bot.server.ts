@@ -1,4 +1,6 @@
 // Server-only helpers: W-API, Fish Audio, AI providers.
+export type AudioMode = "text" | "auto" | "frequency";
+
 export type Cfg = {
   user_id: string;
   wapi_instance_id: string;
@@ -16,6 +18,11 @@ export type Cfg = {
   bot_active: boolean;
   delay_min: number;
   delay_max: number;
+  delay_enabled?: boolean;
+  delay_seconds?: number;
+  audio_mode?: AudioMode;
+  audio_frequency?: number;
+  allow_audio_request?: boolean;
   webhook_secret?: string;
 };
 
@@ -25,6 +32,7 @@ DIRETRIZ DE RESPOSTA (obrigatória):
 - Para enviar mídia, escreva em uma linha própria uma destas tags:
   [IMAGEM: https://url-da-imagem]  [VIDEO: https://url-do-video.mp4]  [AUDIO: texto que será falado]  [LINK: https://url]
 - Para áudio, coloque o texto falado DENTRO da tag, assim: [AUDIO: Olá, tudo bem?]. Nunca escreva o texto e depois só [AUDIO].
+- Dentro de [AUDIO: ...] você pode usar marcações de emoção do Fish Audio: [soft], [emphasis], [pause], [excited]. Elas são preservadas na narração — não remova.
 - Sempre que as instruções acima mandarem enviar algo em áudio, use a tag [AUDIO: ...] com o texto a ser falado; o resto continua em texto.
 - Use somente URLs que aparecem nas instruções acima. Nunca invente links.
 - Envie áudio, imagem, vídeo ou link apenas quando as instruções acima pedirem ou fizer sentido para elas.`;
@@ -171,6 +179,36 @@ export async function aiChat(cfg: Cfg, messages: { role: string; content: string
 }
 
 export type Part = { kind: "text" | "image" | "video" | "audio" | "link"; value: string };
+
+// Matches a media tag allowing NESTED brackets inside the content so Fish
+// emotion marks ([soft], [pause]…) survive inside [AUDIO: …].
+function matchTag(line: string): { idx: number; end: number; tag: string; content: string } | null {
+  const open = /\[(IMAGEM|IMAGE|VIDEO|VÍDEO|AUDIO|ÁUDIO|LINK):\s*/i.exec(line);
+  if (!open) return null;
+  const tagStart = open.index;
+  const contentStart = tagStart + open[0].length;
+  let depth = 1;
+  let i = contentStart;
+  while (i < line.length) {
+    if (line[i] === "[") depth++;
+    else if (line[i] === "]") {
+      depth--;
+      if (depth === 0) break;
+    }
+    i++;
+  }
+  if (depth !== 0) return null;
+  return {
+    idx: tagStart,
+    end: i + 1,
+    tag: open[1]!
+      .toUpperCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, ""),
+    content: line.slice(contentStart, i).trim(),
+  };
+}
+
 // The AI sometimes writes the message and then a bare "[AUDIO]" (or "[ÁUDIO]") marker
 // instead of "[AUDIO: text]"; in that case the text before the marker is spoken.
 export function parseReply(reply: string): Part[] {
@@ -185,31 +223,46 @@ export function parseReply(reply: string): Part[] {
     const t = take();
     if (t) parts.push({ kind: "text", value: t });
   };
+  const kindOf = (tag: string): Part["kind"] =>
+    tag.startsWith("IMAG")
+      ? "image"
+      : tag === "VIDEO"
+        ? "video"
+        : tag === "AUDIO"
+          ? "audio"
+          : "link";
+
   for (const line of reply.split("\n")) {
-    const m = line.match(/\[(IMAGEM|IMAGE|VIDEO|VÍDEO|AUDIO|ÁUDIO|LINK):\s*(.+?)\]/i);
-    const bare = line.match(/\[(AUDIO|ÁUDIO)\]/i);
-    if (m) {
-      flush();
-      const tag = m[1]!
-        .toUpperCase()
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "");
-      parts.push({
-        kind: tag.startsWith("IMAG")
-          ? "image"
-          : tag === "VIDEO"
-            ? "video"
-            : tag === "AUDIO"
-              ? "audio"
-              : "link",
-        value: m[2]!.trim(),
-      });
-    } else if (bare) {
-      const rest = line.replace(bare[0], "").trim();
-      if (rest) buf.push(rest);
+    // Bare "[AUDIO]" marker (no colon): everything before it is spoken.
+    const bare = /\[(AUDIO|ÁUDIO)\]/i.exec(line);
+    if (bare) {
+      const before = line.slice(0, bare.index).trim();
+      if (before) buf.push(before);
       const t = take();
       if (t) parts.push({ kind: "audio", value: t });
-    } else buf.push(line);
+      const after = line.slice(bare.index + bare[0].length).trim();
+      if (after) buf.push(after);
+      continue;
+    }
+    // Consume every tag on the line (a line may hold text + tag + text).
+    let rest = line;
+    let matched = false;
+    for (;;) {
+      const m = matchTag(rest);
+      if (!m) break;
+      matched = true;
+      const before = rest.slice(0, m.idx).trim();
+      if (before) buf.push(before);
+      flush();
+      parts.push({ kind: kindOf(m.tag), value: m.content });
+      rest = rest.slice(m.end);
+    }
+    if (matched) {
+      const tail = rest.trim();
+      if (tail) buf.push(tail);
+    } else {
+      buf.push(line);
+    }
   }
   flush();
   return parts;
@@ -221,22 +274,228 @@ export function licenseOk(l: { active: boolean; starts_at: string; ends_at: stri
   return now >= new Date(l.starts_at).getTime() && now <= new Date(l.ends_at).getTime();
 }
 
-// The panel's min/max delay is counted from when the customer's message arrived. We wait
-// here ourselves: W-API's own delayMessage goes through its queue and is not punctual.
+export function gapMs(cfg: Cfg): number {
+  if (cfg.delay_enabled) return Math.max(0, cfg.delay_seconds ?? 0) * 1000;
+  return pickDelay(cfg.delay_min ?? 0, cfg.delay_max ?? 0) * 1000;
+}
+
+/** Does the customer's text explicitly ask for audio? */
+export function requestsAudio(text: string): boolean {
+  // \b before áudio fails (á is not a word char in JS) — no leading \b.
+  return /(á[uú]dio|audio|fala a[ií]|narra|ouve|ouça|escuta)/i.test(text);
+}
+
+export function audioModeOf(cfg: Cfg): AudioMode {
+  if (cfg.audio_mode === "auto" || cfg.audio_mode === "frequency" || cfg.audio_mode === "text")
+    return cfg.audio_mode;
+  return cfg.audio_replies ? "auto" : "text";
+}
+
+/** Whether THIS reply may use audio (frequency counter + direct request). */
+export function shouldAllowAudio(cfg: Cfg, msgCount: number, userText: string): boolean {
+  const mode = audioModeOf(cfg);
+  if (mode === "text") return false;
+  if (mode === "auto") return true;
+  if (cfg.allow_audio_request !== false && requestsAudio(userText)) return true;
+  return msgCount >= Math.max(1, cfg.audio_frequency ?? 3);
+}
+
+/**
+ * Apply the panel's format preference to parsed parts.
+ * - text: never audio (explicit [AUDIO:] becomes plain text)
+ * - auto / frequency-allowed: text becomes audio when Fish key exists
+ * - frequency-denied: audio becomes plain text
+ */
+export function transformPartsForMode(parts: Part[], cfg: Cfg, allowAudio: boolean): Part[] {
+  const mode = audioModeOf(cfg);
+  if (mode === "text" || (mode === "frequency" && !allowAudio)) {
+    return parts.map((p) => (p.kind === "audio" ? { kind: "text", value: p.value } : p));
+  }
+  const hasKey = !!fishKey(cfg);
+  if (!hasKey) return parts;
+  const toAudio = mode === "auto" || cfg.audio_replies || (mode === "frequency" && allowAudio);
+  if (!toAudio) return parts;
+  return parts.map((p) => (p.kind === "text" ? { kind: "audio", value: p.value } : p));
+}
+
+// Per-conversation send chain: two webhooks for the same phone never send in parallel.
+const queueLocks = new Map<string, Promise<void>>();
+
+export type QueueDeps = {
+  tts?: (cfg: Cfg, text: string) => Promise<string>;
+  send?: typeof wapiSend;
+  sleep?: (ms: number) => Promise<void>;
+};
+
+const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+export async function enqueueReply(
+  db: {
+    from: (t: string) => {
+      insert: (rows: object[]) => PromiseLike<{ error: unknown }> | { error: unknown };
+    };
+  },
+  userId: string,
+  phone: string,
+  parts: Part[],
+): Promise<void> {
+  if (!parts.length) return;
+  const batchId = crypto.randomUUID();
+  const rows = parts.map((p, i) => ({
+    user_id: userId,
+    phone,
+    batch_id: batchId,
+    seq: i,
+    kind: p.kind,
+    payload: p.value,
+    status: "pending",
+  }));
+  const { error } = await db.from("message_queue").insert(rows);
+  if (error) throw error;
+}
+
+type QueueRow = {
+  id: number;
+  batch_id: string;
+  kind: string;
+  payload: string;
+  attempts: number;
+};
+
+async function sendQueueItem(cfg: Cfg, phone: string, item: QueueRow, deps: QueueDeps) {
+  const tts = deps.tts ?? fishTts;
+  const send = deps.send ?? wapiSend;
+  let kind = item.kind as Part["kind"];
+  let payload = item.payload;
+  if (kind === "audio") {
+    try {
+      payload = await tts(cfg, item.payload);
+    } catch {
+      // Fish Audio falhou: envia o texto em vez de perder a resposta.
+      kind = "text";
+      payload = item.payload;
+    }
+  }
+  await send(cfg, kind, phone, payload, "", 0);
+}
+
+// Minimal PostgREST surface used by the queue (injectable for tests).
+export type QueueDb = {
+  // Fluent builder; intentionally loose so the Supabase client and the test mock both fit.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  from: (t: string) => any;
+};
+
+/**
+ * Drains pending message_queue rows for one conversation, strictly in order,
+ * waiting gapMs() between sends. Audio send failure cancels the rest of the
+ * batch so texts never fire right after a failed audio.
+ */
+export async function processMessageQueue(
+  db: QueueDb,
+  cfg: Cfg,
+  phone: string,
+  deps: QueueDeps = {},
+): Promise<void> {
+  const key = `${cfg.user_id}:${phone}`;
+  const prev = queueLocks.get(key) ?? Promise.resolve();
+  const run = prev
+    .then(() => drainQueue(db, cfg, phone, deps))
+    .catch((e) => {
+      console.error("queue drain error", e);
+    });
+  queueLocks.set(key, run);
+  await run;
+}
+
+async function drainQueue(db: QueueDb, cfg: Cfg, phone: string, deps: QueueDeps) {
+  const sleep = deps.sleep ?? defaultSleep;
+  for (;;) {
+    const { data: items } = await db
+      .from("message_queue")
+      .select("id,batch_id,kind,payload,attempts")
+      .eq("user_id", cfg.user_id)
+      .eq("phone", phone)
+      .eq("status", "pending")
+      .order("created_at", { ascending: true })
+      .order("seq", { ascending: true })
+      .limit(1);
+    const item = (items?.[0] ?? null) as QueueRow | null;
+    if (!item) return;
+
+    // Atomic claim: only one processor can move pending → processing.
+    const { data: claimed } = await db
+      .from("message_queue")
+      .update({
+        status: "processing",
+        claimed_at: new Date().toISOString(),
+        attempts: item.attempts + 1,
+      })
+      .eq("id", item.id)
+      .eq("status", "pending")
+      .select("id,batch_id,kind,payload,attempts")
+      .maybeSingle();
+    if (!claimed) continue;
+
+    try {
+      await sendQueueItem(cfg, phone, claimed as QueueRow, deps);
+      await db
+        .from("message_queue")
+        .update({ status: "sent", sent_at: new Date().toISOString(), error: null })
+        .eq("id", claimed.id)
+        .eq("status", "processing");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (claimed.kind === "audio") {
+        await db.from("message_queue").update({ status: "error", error: msg }).eq("id", claimed.id);
+        await db
+          .from("message_queue")
+          .update({ status: "error", error: "cancelado: falha no áudio anterior" })
+          .eq("user_id", cfg.user_id)
+          .eq("phone", phone)
+          .eq("batch_id", claimed.batch_id)
+          .eq("status", "pending");
+        return;
+      }
+      if ((claimed.attempts ?? 1) >= 3) {
+        await db.from("message_queue").update({ status: "error", error: msg }).eq("id", claimed.id);
+      } else {
+        await db
+          .from("message_queue")
+          .update({ status: "pending", error: msg })
+          .eq("id", claimed.id);
+        await sleep(1000);
+        continue;
+      }
+    }
+
+    const { data: more } = await db
+      .from("message_queue")
+      .select("id")
+      .eq("user_id", cfg.user_id)
+      .eq("phone", phone)
+      .eq("status", "pending")
+      .limit(1);
+    if (more?.length) {
+      const g = gapMs(cfg);
+      if (g > 0) await sleep(g);
+    }
+  }
+}
+
+// Legacy sequential sender (tests + simple paths). The webhook uses the queue.
 export async function deliver(
   cfg: Cfg,
   phone: string,
   parts: Part[],
   startedAt = Date.now(),
-  deps: { tts?: (cfg: Cfg, text: string) => Promise<string>; send?: typeof wapiSend } = {},
+  deps: QueueDeps = {},
 ) {
   const tts = deps.tts ?? fishTts;
   const send = deps.send ?? wapiSend;
   let first = true;
   for (const p of parts) {
-    const waitMs =
-      pickDelay(cfg.delay_min ?? 0, cfg.delay_max ?? 0) * 1000 -
-      (first ? Date.now() - startedAt : 0);
+    const waitMs = gapMs(cfg) - (first ? Date.now() - startedAt : 0);
     first = false;
     const wantAudio =
       p.kind === "audio" || (p.kind === "text" && cfg.audio_replies && !!fishKey(cfg));
@@ -247,11 +506,10 @@ export async function deliver(
         payload = await tts(cfg, p.value);
         kind = "audio";
       } catch {
-        // Fish Audio sem crédito ou sem resposta: manda o texto em vez de sumir com a resposta.
         kind = "text";
       }
     }
-    if (waitMs > 0) await new Promise((r) => setTimeout(r, waitMs));
+    if (waitMs > 0) await (deps.sleep ?? defaultSleep)(waitMs);
     await send(cfg, kind, phone, payload, "", 0);
   }
 }

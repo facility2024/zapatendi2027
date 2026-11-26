@@ -1,5 +1,15 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { aiChat, deliver, isRefusal, licenseOk, parseReply, type Cfg } from "@/lib/bot.server";
+import {
+  aiChat,
+  enqueueReply,
+  isRefusal,
+  licenseOk,
+  parseReply,
+  processMessageQueue,
+  shouldAllowAudio,
+  transformPartsForMode,
+  type Cfg,
+} from "@/lib/bot.server";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
@@ -67,8 +77,31 @@ export const Route = createFileRoute("/api/public/wapi/$secret")({
                 .eq("user_id", cfg.user_id)
                 .eq("phone", msg.phone);
               if (error) throw error;
+              await supabaseAdmin
+                .from("chat_state")
+                .delete()
+                .eq("user_id", cfg.user_id)
+                .eq("phone", msg.phone);
               msg.text = "Olá";
             }
+            // Frequency counter: +1 received message; audio resets it after send.
+            const { data: cs } = await supabaseAdmin
+              .from("chat_state")
+              .select("msg_count")
+              .eq("user_id", cfg.user_id)
+              .eq("phone", msg.phone)
+              .maybeSingle();
+            const msgCount = (cs?.msg_count ?? 0) + 1;
+            await supabaseAdmin.from("chat_state").upsert(
+              {
+                user_id: cfg.user_id,
+                phone: msg.phone,
+                msg_count: msgCount,
+                updated_at: new Date().toISOString(),
+              },
+              { onConflict: "user_id,phone" },
+            );
+
             const { data: hist } = await supabaseAdmin
               .from("ai_memory")
               .select("role,content")
@@ -89,7 +122,18 @@ export const Route = createFileRoute("/api/public/wapi/$secret")({
               { user_id: cfg.user_id, phone: msg.phone, role: "user", content: msg.text },
               { user_id: cfg.user_id, phone: msg.phone, role: "assistant", content: reply },
             ]);
-            await deliver(cfg as Cfg, msg.phone, parseReply(reply), startedAt);
+
+            const allowAudio = shouldAllowAudio(cfg as Cfg, msgCount, msg.text);
+            const parts = transformPartsForMode(parseReply(reply), cfg as Cfg, allowAudio);
+            await enqueueReply(supabaseAdmin, cfg.user_id, msg.phone, parts);
+            await processMessageQueue(supabaseAdmin, cfg as Cfg, msg.phone);
+            if (allowAudio && parts.some((p) => p.kind === "audio")) {
+              await supabaseAdmin
+                .from("chat_state")
+                .update({ msg_count: 0, updated_at: new Date().toISOString() })
+                .eq("user_id", cfg.user_id)
+                .eq("phone", msg.phone);
+            }
             console.log("wapi replied in ms", Date.now() - startedAt);
           } catch (e) {
             console.error("webhook error", e);

@@ -12,6 +12,7 @@ import {
   wapiSetWebhook,
   fishTts,
   licenseOk,
+  gapMs,
   type Cfg,
 } from "./bot.server";
 
@@ -137,4 +138,83 @@ export const setupWebhook = createServerFn({ method: "POST" })
     } catch {
       return { ok: false, msg: "Falha ao configurar webhook" };
     }
+  });
+
+export type SeqStep = {
+  step: string;
+  at: string;
+  detail?: string;
+  waitedMs?: number;
+  expectedMs?: number;
+  ok?: boolean;
+};
+
+// Simulates one AI reply as a queue sequence (audio → texts) with the real
+// configured gap, without sending to WhatsApp. Returns a timeline the panel shows.
+export const testAiSequence = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }): Promise<{ ok: boolean; msg: string; steps: SeqStep[] }> => {
+    const cfg = await loadCfg(context.supabase, context.userId);
+    const { data: lic } = await context.supabase
+      .from("licenses")
+      .select("*")
+      .eq("user_id", context.userId)
+      .single();
+    if (!licenseOk(lic)) return { ok: false, msg: "Licença inativa ou vencida", steps: [] };
+
+    const gap = gapMs(cfg);
+    const steps: SeqStep[] = [];
+    const seq: { label: string; audio: boolean; content: string }[] = [
+      { label: "Áudio de apresentação", audio: true, content: "[soft] Olá! Tudo bem?" },
+      { label: "Texto 1", audio: false, content: "Que bom ter você aqui!" },
+      { label: "Texto 2", audio: false, content: "Você demonstrou interesse em fazer parte." },
+      { label: "Texto 3", audio: false, content: "Vou explicar como funciona." },
+    ];
+    const t0 = Date.now();
+    for (let i = 0; i < seq.length; i++) {
+      const s = seq[i]!;
+      if (i > 0) {
+        const waitStart = Date.now();
+        if (gap > 0) await new Promise((r) => setTimeout(r, gap));
+        const waited = Date.now() - waitStart;
+        steps.push({
+          step: `Espera antes de "${s.label}"`,
+          at: new Date().toISOString(),
+          waitedMs: waited,
+          expectedMs: gap,
+          ok: Math.abs(waited - gap) <= 500,
+        });
+      }
+      let detail = "";
+      if (s.audio) {
+        if (fishKey(cfg)) {
+          try {
+            await fishTts(cfg, s.content);
+            detail = "Fish Audio gerado (com marcações preservadas)";
+          } catch (e) {
+            detail = `Fish Audio falhou → texto: ${e instanceof Error ? e.message : e}`;
+          }
+        } else {
+          detail = "Sem chave Fish — seria enviado como texto";
+        }
+      }
+      steps.push({
+        step: `Envio: ${s.label}`,
+        at: new Date().toISOString(),
+        detail: detail || s.content,
+        ok: true,
+      });
+    }
+    steps.push({
+      step: "Sequência concluída",
+      at: new Date().toISOString(),
+      waitedMs: Date.now() - t0,
+      expectedMs: gap * (seq.length - 1),
+      ok: true,
+    });
+    return {
+      ok: true,
+      msg: `Sequência ok — intervalo ${gap / 1000}s entre ${seq.length} mensagens`,
+      steps,
+    };
   });

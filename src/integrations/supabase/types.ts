@@ -39,10 +39,15 @@ export type Database = {
         Row: {
           ai_model: string;
           ai_provider: string;
+          allow_audio_request: boolean;
+          audio_frequency: number;
+          audio_mode: string;
           audio_replies: boolean;
           bot_active: boolean;
+          delay_enabled: boolean;
           delay_max: number;
           delay_min: number;
+          delay_seconds: number;
           fish_api_key: string;
           fish_voice_id: string;
           gemini_key: string;
@@ -59,10 +64,15 @@ export type Database = {
         Insert: {
           ai_model?: string;
           ai_provider?: string;
+          allow_audio_request?: boolean;
+          audio_frequency?: number;
+          audio_mode?: string;
           audio_replies?: boolean;
           bot_active?: boolean;
+          delay_enabled?: boolean;
           delay_max?: number;
           delay_min?: number;
+          delay_seconds?: number;
           fish_api_key?: string;
           fish_voice_id?: string;
           gemini_key?: string;
@@ -79,10 +89,15 @@ export type Database = {
         Update: {
           ai_model?: string;
           ai_provider?: string;
+          allow_audio_request?: boolean;
+          audio_frequency?: number;
+          audio_mode?: string;
           audio_replies?: boolean;
           bot_active?: boolean;
+          delay_enabled?: boolean;
           delay_max?: number;
           delay_min?: number;
+          delay_seconds?: number;
           fish_api_key?: string;
           fish_voice_id?: string;
           gemini_key?: string;
@@ -95,6 +110,75 @@ export type Database = {
           wapi_instance_id?: string;
           wapi_token?: string;
           webhook_secret?: string;
+        };
+        Relationships: [];
+      };
+      chat_state: {
+        Row: {
+          msg_count: number;
+          phone: string;
+          updated_at: string;
+          user_id: string;
+        };
+        Insert: {
+          msg_count?: number;
+          phone: string;
+          updated_at?: string;
+          user_id: string;
+        };
+        Update: {
+          msg_count?: number;
+          phone?: string;
+          updated_at?: string;
+          user_id?: string;
+        };
+        Relationships: [];
+      };
+      message_queue: {
+        Row: {
+          attempts: number;
+          batch_id: string;
+          claimed_at: string | null;
+          created_at: string;
+          error: string | null;
+          id: number;
+          kind: string;
+          payload: string;
+          phone: string;
+          sent_at: string | null;
+          seq: number;
+          status: string;
+          user_id: string;
+        };
+        Insert: {
+          attempts?: number;
+          batch_id: string;
+          claimed_at?: string | null;
+          created_at?: string;
+          error?: string | null;
+          id?: number;
+          kind: string;
+          payload: string;
+          phone: string;
+          sent_at?: string | null;
+          seq: number;
+          status?: string;
+          user_id: string;
+        };
+        Update: {
+          attempts?: number;
+          batch_id?: string;
+          claimed_at?: string | null;
+          created_at?: string;
+          error?: string | null;
+          id?: number;
+          kind?: string;
+          payload?: string;
+          phone?: string;
+          sent_at?: string | null;
+          seq?: number;
+          status?: string;
+          user_id?: string;
         };
         Relationships: [];
       };
