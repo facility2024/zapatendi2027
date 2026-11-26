@@ -67,10 +67,15 @@ export async function wapiSend(
   delay?: number,
 ) {
   const base = (cfg.wapi_base_url || "https://api.w-api.app/v1").replace(/\/$/, "");
+  // WhatsApp não aceita .gif em send-image (só JPEG/PNG) — a W-API tem
+  // endpoint próprio send-gif; sem ele a mídia falha na fila e vaza texto.
+  const isGif = kind === "image" && /\.gif(?:[?#]|$)/i.test(payload.trim());
   const map = {
     text: ["send-text", { phone, message: payload }],
     link: ["send-text", { phone, message: caption ? `${caption}\n${payload}` : payload }],
-    image: ["send-image", { phone, image: payload, caption }],
+    image: isGif
+      ? (["send-gif", { phone, gif: payload, caption }] as const)
+      : (["send-image", { phone, image: payload, caption }] as const),
     video: ["send-video", { phone, video: payload, caption }],
     audio: ["send-audio", { phone, audio: payload }],
   } as const;

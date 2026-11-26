@@ -12,6 +12,7 @@ import {
   generateImage,
   normalizeMediaParts,
   mediaKindForUrl,
+  wapiSend,
   type Cfg,
 } from "@/lib/bot.server";
 
@@ -611,5 +612,33 @@ describe("normalizeMediaParts (media plays in WhatsApp, not as tab link)", () =>
     });
     expect(sent).toEqual([{ kind: "image", payload: gif }]);
     expect(rows[0]!["kind"]).toBe("image");
+  });
+
+  it("wapiSend routes .gif images to send-gif endpoint (WhatsApp rejects gif in send-image)", async () => {
+    const fetchMock = vi.fn((..._args: unknown[]) =>
+      Promise.resolve({ ok: true, text: () => Promise.resolve("{}") } as Response),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await wapiSend(
+      cfg({ wapi_instance_id: "inst1", wapi_token: "tok" }),
+      "image",
+      "5511999999999",
+      gif,
+    );
+    const firstCall = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(firstCall[0]).toContain("/message/send-gif");
+    const body = JSON.parse(firstCall[1].body as string) as { gif: string; phone: string };
+    expect(body.gif).toBe(gif);
+
+    // Non-gif images still use send-image.
+    fetchMock.mockClear();
+    await wapiSend(
+      cfg({ wapi_instance_id: "inst1", wapi_token: "tok" }),
+      "image",
+      "5511999999999",
+      "https://a.com/photo.jpg",
+    );
+    const secondCall = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(secondCall[0]).toContain("/message/send-image");
   });
 });
