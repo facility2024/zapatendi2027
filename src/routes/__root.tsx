@@ -83,10 +83,18 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: "zapcomia" },
-      { name: "description", content: "Tenha o melhor sistema de gerar seus agentes persuasivos de vendas com resposta de áudio e interação humanizada." },
+      {
+        name: "description",
+        content:
+          "Tenha o melhor sistema de gerar seus agentes persuasivos de vendas com resposta de áudio e interação humanizada.",
+      },
       { name: "author", content: "ZapcomIA" },
       { property: "og:title", content: "zapcomia" },
-      { property: "og:description", content: "Tenha o melhor sistema de gerar seus agentes persuasivos de vendas com resposta de áudio e interação humanizada." },
+      {
+        property: "og:description",
+        content:
+          "Tenha o melhor sistema de gerar seus agentes persuasivos de vendas com resposta de áudio e interação humanizada.",
+      },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
       { name: "twitter:site", content: "@zapcomia" },
