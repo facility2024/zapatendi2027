@@ -115,6 +115,7 @@ export function Panel({ userId, email }: { userId: string; email: string }) {
     if (data?.cfg) setCfg(data.cfg);
   }, [data?.cfg]);
   const [phone, setPhone] = useState("");
+  const [sending, setSending] = useState<string | null>(null);
   const [testVal, setTestVal] = useState({
     text: "Olá! Teste do painel ✅",
     audio: "Olá, este é um teste de áudio.",
@@ -157,9 +158,17 @@ export function Panel({ userId, email }: { userId: string; email: string }) {
     error ? toast.error("Erro ao limpar") : toast.success("Memória da IA limpa");
   }
   async function wa(kind: "status" | "text" | "audio" | "image" | "video") {
+    if (sending) return;
     const value = kind === "status" ? "" : testVal[kind];
-    const r = await waFn({ data: { kind, phone, value } });
-    r.ok ? toast.success(r.msg) : toast.error(r.msg);
+    setSending(kind);
+    try {
+      const r = await waFn({ data: { kind, phone, value } });
+      r.ok ? toast.success(r.msg) : toast.error(r.msg);
+    } catch {
+      toast.error("Falha ao enviar teste");
+    } finally {
+      setSending(null);
+    }
   }
   async function ai(provider: "openai" | "grok" | "gemini") {
     await save();
@@ -533,6 +542,7 @@ export function Panel({ userId, email }: { userId: string; email: string }) {
               v={testVal.text}
               on={(v) => setTestVal({ ...testVal, text: v })}
               go={() => wa("text")}
+              busy={sending === "text"}
             />
             <TestRow
               icon={<Mic className="h-4 w-4" />}
@@ -540,6 +550,7 @@ export function Panel({ userId, email }: { userId: string; email: string }) {
               v={testVal.audio}
               on={(v) => setTestVal({ ...testVal, audio: v })}
               go={() => wa("audio")}
+              busy={sending === "audio"}
             />
             <TestRow
               icon={<Image className="h-4 w-4" />}
@@ -548,6 +559,7 @@ export function Panel({ userId, email }: { userId: string; email: string }) {
               v={testVal.image}
               on={(v) => setTestVal({ ...testVal, image: v })}
               go={() => wa("image")}
+              busy={sending === "image"}
             />
             <TestRow
               icon={<Video className="h-4 w-4" />}
@@ -556,6 +568,7 @@ export function Panel({ userId, email }: { userId: string; email: string }) {
               v={testVal.video}
               on={(v) => setTestVal({ ...testVal, video: v })}
               go={() => wa("video")}
+              busy={sending === "video"}
             />
           </Card>
         </TabsContent>
@@ -606,6 +619,7 @@ function TestRow({
   on,
   go,
   ph,
+  busy,
 }: {
   icon: React.ReactNode;
   label: string;
@@ -613,13 +627,27 @@ function TestRow({
   on: (v: string) => void;
   go: () => void;
   ph?: string;
+  busy?: boolean;
 }) {
   return (
     <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
       <Input value={v} placeholder={ph} onChange={(e) => on(e.target.value)} aria-label={label} />
-      <Button onClick={go}>
-        {icon}
-        {label}
+      <Button
+        onClick={go}
+        disabled={busy}
+        className="min-w-36 active:scale-95 transition-transform"
+      >
+        {busy ? (
+          <>
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Enviando…
+          </>
+        ) : (
+          <>
+            {icon}
+            {label}
+          </>
+        )}
       </Button>
     </div>
   );
