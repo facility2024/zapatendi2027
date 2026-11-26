@@ -31,8 +31,8 @@ export const MEDIA_DIRECTIVE = `
 DIRETRIZ DE RESPOSTA (obrigatória):
 - Responda em texto curto e natural, como uma pessoa real conversando no WhatsApp privado — nunca como suporte ou atendente corporativo.
 - Para enviar mídia, escreva em uma linha própria uma destas tags:
-  [IMAGEM: https://url-da-imagem]  [VIDEO: https://url-do-video.mp4]  [AUDIO: texto que será falado]  [LINK: https://url]
-- [LINK:] é só para páginas web (html). Para arquivo de mídia use [VIDEO:] (mp4) ou [IMAGEM:] (foto, gif) — assim executam DENTRO do WhatsApp. URLs de mídia soltas no texto também são detectadas e enviadas como mídia.
+  [IMAGEM: https://url-da-imagem]  [GIF: https://url-do-gif.gif]  [VIDEO: https://url-do-video.mp4]  [AUDIO: texto que será falado]  [LINK: https://url]
+- [LINK:] é só para páginas web (html). Para arquivo de mídia use [VIDEO:] (mp4) ou [IMAGEM:]/[GIF:] (foto, gif) — assim executam DENTRO do WhatsApp. URLs de mídia soltas no texto também são detectadas e enviadas como mídia.
 - Para áudio, coloque o texto falado DENTRO da tag, assim: [AUDIO: Olá, tudo bem?]. Nunca escreva o texto e depois só [AUDIO].
 - Dentro de [AUDIO: ...] você pode usar marcações de emoção do Fish Audio: [soft], [emphasis], [pause], [excited]. Elas são preservadas na narração — não remova.
 - Sempre que as instruções acima mandarem enviar algo em áudio, use a tag [AUDIO: ...] com o texto a ser falado; o resto continua em texto.
@@ -297,7 +297,7 @@ export type Part = { kind: "text" | "image" | "video" | "audio" | "link"; value:
 // Matches a media tag allowing NESTED brackets inside the content so Fish
 // emotion marks ([soft], [pause]…) survive inside [AUDIO: …].
 function matchTag(line: string): { idx: number; end: number; tag: string; content: string } | null {
-  const open = /\[(IMAGEM|IMAGE|VIDEO|VÍDEO|AUDIO|ÁUDIO|LINK):\s*/i.exec(line);
+  const open = /\[(IMAGEM|IMAGE|GIF|VIDEO|VÍDEO|AUDIO|ÁUDIO|LINK):\s*/i.exec(line);
   if (!open) return null;
   const tagStart = open.index;
   const contentStart = tagStart + open[0].length;
@@ -325,6 +325,43 @@ function matchTag(line: string): { idx: number; end: number; tag: string; conten
 
 // The AI sometimes writes the message and then a bare "[AUDIO]" (or "[ÁUDIO]") marker
 // instead of "[AUDIO: text]"; in that case the text before the marker is spoken.
+
+// The model sometimes breaks a tag across lines ("[GIF:" / url / "]"), which would
+// leak as literal text — merge continuation lines into one line before parsing.
+function tagUnclosed(line: string): boolean {
+  const re = /\[(IMAGEM|IMAGE|GIF|VIDEO|VÍDEO|AUDIO|ÁUDIO|LINK):/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(line))) {
+    let depth = 0;
+    for (let i = m.index; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === "[") depth++;
+      else if (ch === "]") {
+        depth--;
+        if (depth === 0) break;
+      }
+    }
+    if (depth > 0) return true;
+  }
+  return false;
+}
+
+function joinMultilineTags(reply: string): string {
+  const lines = reply.split("\n");
+  const out: string[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    let line = lines[i]!;
+    while (tagUnclosed(line) && i + 1 < lines.length) {
+      i++;
+      line += " " + lines[i]!;
+    }
+    out.push(line);
+    i++;
+  }
+  return out.join("\n");
+}
+
 export function parseReply(reply: string): Part[] {
   const parts: Part[] = [];
   let buf: string[] = [];
@@ -338,7 +375,7 @@ export function parseReply(reply: string): Part[] {
     if (t) parts.push({ kind: "text", value: t });
   };
   const kindOf = (tag: string): Part["kind"] =>
-    tag.startsWith("IMAG")
+    tag.startsWith("IMAG") || tag === "GIF"
       ? "image"
       : tag === "VIDEO"
         ? "video"
@@ -346,7 +383,7 @@ export function parseReply(reply: string): Part[] {
           ? "audio"
           : "link";
 
-  for (const line of reply.split("\n")) {
+  for (const line of joinMultilineTags(reply).split("\n")) {
     // Bare "[AUDIO]" marker (no colon): everything before it is spoken.
     const bare = /\[(AUDIO|ÁUDIO)\]/i.exec(line);
     if (bare) {

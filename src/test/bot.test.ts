@@ -200,6 +200,16 @@ describe("fish audio tags", () => {
     expect(p[1]!.value).toBe("[emphasis] olha isso");
     expect(p[2]!.value).toBe("e mais texto");
   });
+
+  it("parses [GIF: url] as image (WhatsApp screenshot case)", () => {
+    const gif = "https://COCONUDIMUDIAL.b-cdn.net/TELEGRAMWEB/sex-standing-23.gif";
+    expect(parseReply(`[GIF: ${gif}]`)).toEqual([{ kind: "image", value: gif }]);
+  });
+
+  it("merges tags broken across lines instead of leaking [GIF: as text", () => {
+    const gif = "https://a.com/x.gif";
+    expect(parseReply(`[GIF:\n${gif}\n]`)).toEqual([{ kind: "image", value: gif }]);
+  });
 });
 
 describe("audio mode", () => {
