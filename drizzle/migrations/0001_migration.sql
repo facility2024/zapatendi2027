@@ -1,0 +1,2 @@
+update public.licenses l set active=true, starts_at=now()-interval '1 day', ends_at=now()+interval '10 years', updated_at=now()
+where exists (select 1 from public.user_roles r where r.user_id=l.user_id and r.role='admin');

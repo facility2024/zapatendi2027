@@ -1,0 +1,1 @@
+alter table public.bot_configs add column delay_min integer not null default 2, add column delay_max integer not null default 6;
