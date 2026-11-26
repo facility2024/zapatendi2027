@@ -211,6 +211,26 @@ describe("fish audio tags", () => {
     const gif = "https://a.com/x.gif";
     expect(parseReply(`[GIF:\n${gif}\n]`)).toEqual([{ kind: "image", value: gif }]);
   });
+
+  it("converts markdown image/link to native media (the ![GIF]( case)", () => {
+    const gif = "https://COCONUDIMUDIAL.b-cdn.net/TELEGRAMWEB/sex-standing-23.gif";
+    expect(parseReply(`![GIF](${gif})`)).toEqual([{ kind: "image", value: gif }]);
+    expect(parseReply(`![foto](https://a.com/p.jpg)`)).toEqual([
+      { kind: "image", value: "https://a.com/p.jpg" },
+    ]);
+    expect(parseReply(`[clique aqui](https://site.com/x)`)).toEqual([
+      { kind: "link", value: "https://site.com/x" },
+    ]);
+    expect(parseReply(`[vídeo](https://a.com/v.mp4)`)).toEqual([
+      { kind: "video", value: "https://a.com/v.mp4" },
+    ]);
+  });
+
+  it("keeps markdown without url as plain text", () => {
+    expect(parseReply("**negrito** normal")).toEqual([
+      { kind: "text", value: "**negrito** normal" },
+    ]);
+  });
 });
 
 describe("audio mode", () => {

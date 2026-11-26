@@ -33,6 +33,7 @@ DIRETRIZ DE RESPOSTA (obrigatória):
 - Para enviar mídia, escreva em uma linha própria uma destas tags:
   [IMAGEM: https://url-da-imagem]  [GIF: https://url-do-gif.gif]  [VIDEO: https://url-do-video.mp4]  [AUDIO: texto que será falado]  [LINK: https://url]
 - [LINK:] é só para páginas web (html). Para arquivo de mídia use [VIDEO:] (mp4) ou [IMAGEM:]/[GIF:] (foto, gif) — assim executam DENTRO do WhatsApp. URLs de mídia soltas no texto também são detectadas e enviadas como mídia.
+- NUNCA use markdown de imagem/link (![texto](url) ou [texto](url)) — use somente as tags acima.
 - Para áudio, coloque o texto falado DENTRO da tag, assim: [AUDIO: Olá, tudo bem?]. Nunca escreva o texto e depois só [AUDIO].
 - Dentro de [AUDIO: ...] você pode usar marcações de emoção do Fish Audio: [soft], [emphasis], [pause], [excited]. Elas são preservadas na narração — não remova.
 - Sempre que as instruções acima mandarem enviar algo em áudio, use a tag [AUDIO: ...] com o texto a ser falado; o resto continua em texto.
@@ -367,7 +368,27 @@ function joinMultilineTags(reply: string): string {
   return out.join("\n");
 }
 
-export function parseReply(reply: string): Part[] {
+// The model sometimes answers in markdown (![alt](url) / [text](url)) instead of
+// our tags — convert media markdown to [IMAGEM:]/[VIDEO:] before parsing so the
+// whole thing becomes one native part (never a leftover "![GIF](" text bubble).
+function normalizeMarkdownMedia(reply: string): string {
+  return reply
+    .replace(/!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g, (_m, _alt, url: string) => {
+      const k = mediaKindForUrl(url);
+      if (k === "video") return `[VIDEO: ${url}]`;
+      if (k === "image") return `[IMAGEM: ${url}]`;
+      return url;
+    })
+    .replace(/\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g, (_m, text: string, url: string) => {
+      const k = mediaKindForUrl(url);
+      if (k === "video") return `[VIDEO: ${url}]`;
+      if (k === "image") return `[IMAGEM: ${url}]`;
+      return text ? `[LINK: ${url}]` : url;
+    });
+}
+
+export function parseReply(replyIn: string): Part[] {
+  const reply = normalizeMarkdownMedia(replyIn);
   const parts: Part[] = [];
   let buf: string[] = [];
   const take = () => {
