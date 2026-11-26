@@ -30,16 +30,75 @@ export function Admin() {
     },
   });
   return (
-    <div className="space-y-3">
-      <h2 className="text-lg font-semibold">Licenças dos usuários</h2>
-      {data.map((u) => (
-        <UserRow
-          key={u.id}
-          u={u}
-          onSaved={() => qc.invalidateQueries({ queryKey: ["admin-users"] })}
-        />
-      ))}
+    <div className="space-y-6">
+      <ChangePassword />
+      <div className="space-y-3">
+        <h2 className="text-lg font-semibold">Licenças dos usuários</h2>
+        {data.map((u) => (
+          <UserRow
+            key={u.id}
+            u={u}
+            onSaved={() => qc.invalidateQueries({ queryKey: ["admin-users"] })}
+          />
+        ))}
+      </div>
     </div>
+  );
+}
+
+function ChangePassword() {
+  const [pw, setPw] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [busy, setBusy] = useState(false);
+  async function save(e: React.FormEvent) {
+    e.preventDefault();
+    if (pw.length < 6) {
+      toast.error("A senha precisa de ao menos 6 caracteres");
+      return;
+    }
+    if (pw !== pw2) {
+      toast.error("As senhas não coincidem");
+      return;
+    }
+    setBusy(true);
+    const { error } = await supabase.auth.updateUser({ password: pw });
+    setBusy(false);
+    if (error) toast.error(error.message);
+    else {
+      toast.success("Senha alterada com sucesso");
+      setPw("");
+      setPw2("");
+    }
+  }
+  return (
+    <form onSubmit={save} className="space-y-3 rounded-xl border bg-card p-4">
+      <h2 className="text-lg font-semibold">Alterar senha</h2>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="text-xs text-muted-foreground">
+          Nova senha
+          <Input
+            type="password"
+            autoComplete="new-password"
+            minLength={6}
+            value={pw}
+            onChange={(e) => setPw(e.target.value)}
+            required
+          />
+        </label>
+        <label className="text-xs text-muted-foreground">
+          Confirmar nova senha
+          <Input
+            type="password"
+            autoComplete="new-password"
+            minLength={6}
+            value={pw2}
+            onChange={(e) => setPw2(e.target.value)}
+            required
+          />
+        </label>
+      </div>
+      <Button disabled={busy}>{busy ? "Salvando…" : "Salvar nova senha"}</Button>
+    </form>
   );
 }
 
