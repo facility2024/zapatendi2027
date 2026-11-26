@@ -146,15 +146,12 @@ export const Route = createFileRoute("/api/public/wapi/$secret")({
             console.error("webhook error", e);
           }
         })();
-        // W-API waits for our answer before sending the next webhook, so a slow reply
-        // (AI + audio + delay) held back every later message. Answer now, finish in background.
-        const wu = (request as unknown as { waitUntil?: (p: Promise<unknown>) => void }).waitUntil;
-        if (typeof wu === "function") {
-          wu.call(request, work);
-          return Response.json({ ok: true, queued: true });
-        }
-        await work;
-        return Response.json({ ok: true });
+        // ALWAYS answer W-API immediately and finish in background. On
+        // Easypanel (Node) there is no waitUntil — awaiting `work` here blocked
+        // the response; if AI/send hung, W-API held every later webhook and the
+        // bot looked dead ("trava e não responde mais").
+        void work;
+        return Response.json({ ok: true, queued: true });
       },
     },
   },

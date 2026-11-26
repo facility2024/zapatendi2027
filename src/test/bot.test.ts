@@ -661,4 +661,31 @@ describe("normalizeMediaParts (media plays in WhatsApp, not as tab link)", () =>
     const secondCall = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(secondCall[0]).toContain("/message/send-image");
   });
+
+  it("releases the conversation lock when a drain hangs (bot freeze regression)", async () => {
+    const rows: Row[] = [];
+    const db = mockDb(rows);
+    await enqueueReply(db as never, "u", "5517", [{ kind: "text", value: "stuck" }]);
+    const t0 = Date.now();
+    await processMessageQueue(db as never, qcfg(), "5517", {
+      send: () => new Promise(() => {}), // hangs forever
+      sleep: async () => {},
+      drainTimeoutMs: 50,
+    });
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(40);
+    // Lock was released: a follow-up drain for the same conversation runs.
+    const sent: string[] = [];
+    await processMessageQueue(db as never, qcfg(), "5517", {
+      send: async (_c, _k, _p, payload) => {
+        sent.push(payload);
+        return "";
+      },
+      sleep: async () => {},
+      drainTimeoutMs: 50,
+    });
+    // The stuck row is still "processing" (never completed) — only pending
+    // rows are picked, so nothing new sends, but the call must resolve fast.
+    expect(sent).toEqual([]);
+    expect(Date.now() - t0).toBeLessThan(5_000);
+  });
 });

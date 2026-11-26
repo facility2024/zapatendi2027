@@ -82,17 +82,30 @@ export async function wapiSend(
   } as const;
   const [path, b] = map[kind];
   const body = delay === undefined ? b : { ...b, delayMessage: delay };
-  const res = await fetch(
-    `${base}/message/${path}?instanceId=${encodeURIComponent(cfg.wapi_instance_id)}`,
-    {
-      method: "POST",
-      headers: { Authorization: `Bearer ${cfg.wapi_token}`, "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    },
-  );
-  const text = await res.text();
-  if (!res.ok) throw new Error(`W-API ${res.status}: ${text.slice(0, 300)}`);
-  return text;
+  const doSend = async (ep: string, payload: unknown) => {
+    const res = await fetch(
+      `${base}/message/${ep}?instanceId=${encodeURIComponent(cfg.wapi_instance_id)}`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${cfg.wapi_token}`, "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(30_000),
+      },
+    );
+    const text = await res.text();
+    if (!res.ok) throw new Error(`W-API ${res.status}: ${text.slice(0, 300)}`);
+    return text;
+  };
+  if (isGif) {
+    // send-gif pode não existir no plano da instância → cai para send-image.
+    try {
+      return await doSend("send-gif", b);
+    } catch (e) {
+      if (!(e instanceof Error) || !/^W-API 4\d\d/.test(e.message)) throw e;
+      return await doSend("send-image", { phone, image: payload, caption });
+    }
+  }
+  return await doSend(path, b);
 }
 
 export function fishKey(cfg: Cfg) {
@@ -108,6 +121,7 @@ export async function fishTts(cfg: Cfg, text: string) {
       model: "s2.1-pro-free",
     },
     body: JSON.stringify({ text, reference_id: cfg.fish_voice_id || undefined, format: "mp3" }),
+    signal: AbortSignal.timeout(60_000),
   });
   if (!res.ok) throw new Error(`Fish Audio ${res.status}: ${(await res.text()).slice(0, 200)}`);
   const buf = new Uint8Array(await res.arrayBuffer());
@@ -212,6 +226,7 @@ export async function generateImage(cfg: Cfg, prompt: string): Promise<string> {
       size: "1024x1024",
       response_format: "b64_json",
     }),
+    signal: AbortSignal.timeout(120_000),
   });
   if (!res.ok) throw new Error(`OpenAI img ${res.status}: ${(await res.text()).slice(0, 200)}`);
   const j = (await res.json()) as { data?: { b64_json?: string }[] };
@@ -278,6 +293,9 @@ async function callAi(cfg: Cfg, messages: { role: string; content: string }[]) {
     method: "POST",
     headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
     body: JSON.stringify({ model: cfg.ai_model, messages }),
+    // A provider that never answers used to hang the whole webhook → W-API
+    // held every later message and the bot looked dead.
+    signal: AbortSignal.timeout(60_000),
   });
   if (!res.ok) throw new Error(`IA ${res.status}: ${(await res.text()).slice(0, 200)}`);
   const j = (await res.json()) as { choices?: { message?: { content?: string } }[] };
@@ -503,6 +521,8 @@ export type QueueDeps = {
   send?: typeof wapiSend;
   sleep?: (ms: number) => Promise<void>;
   genImage?: (cfg: Cfg, prompt: string) => Promise<string>;
+  /** Max time one drain may hold the conversation lock. Default 180s. */
+  drainTimeoutMs?: number;
 };
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -575,6 +595,27 @@ export type QueueDb = {
  * waiting gapMs() between sends. Audio send failure cancels the rest of the
  * batch so texts never fire right after a failed audio.
  */
+// Resolves when `p` settles; on timeout calls onTimeout and resolves anyway so
+// a hung drain can never hold the conversation lock forever.
+function withTimeout<T>(p: Promise<T>, ms: number, onTimeout: () => void): Promise<T | void> {
+  return new Promise<T | void>((resolve, reject) => {
+    const t = setTimeout(() => {
+      onTimeout();
+      resolve();
+    }, ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      },
+    );
+  });
+}
+
 export async function processMessageQueue(
   db: QueueDb,
   cfg: Cfg,
@@ -584,7 +625,11 @@ export async function processMessageQueue(
   const key = `${cfg.user_id}:${phone}`;
   const prev = queueLocks.get(key) ?? Promise.resolve();
   const run = prev
-    .then(() => drainQueue(db, cfg, phone, deps))
+    .then(() =>
+      withTimeout(drainQueue(db, cfg, phone, deps), deps.drainTimeoutMs ?? 180_000, () =>
+        console.error(`queue drain timeout for ${phone} — releasing lock`),
+      ),
+    )
     .catch((e) => {
       console.error("queue drain error", e);
     });
