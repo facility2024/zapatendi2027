@@ -32,6 +32,7 @@ DIRETRIZ DE RESPOSTA (obrigatória):
 - Responda em texto curto e natural, como uma pessoa real conversando no WhatsApp privado — nunca como suporte ou atendente corporativo.
 - Para enviar mídia, escreva em uma linha própria uma destas tags:
   [IMAGEM: https://url-da-imagem]  [VIDEO: https://url-do-video.mp4]  [AUDIO: texto que será falado]  [LINK: https://url]
+- [LINK:] é só para páginas web (html). Para arquivo de mídia use [VIDEO:] (mp4) ou [IMAGEM:] (foto, gif) — assim executam DENTRO do WhatsApp. URLs de mídia soltas no texto também são detectadas e enviadas como mídia.
 - Para áudio, coloque o texto falado DENTRO da tag, assim: [AUDIO: Olá, tudo bem?]. Nunca escreva o texto e depois só [AUDIO].
 - Dentro de [AUDIO: ...] você pode usar marcações de emoção do Fish Audio: [soft], [emphasis], [pause], [excited]. Elas são preservadas na narração — não remova.
 - Sempre que as instruções acima mandarem enviar algo em áudio, use a tag [AUDIO: ...] com o texto a ser falado; o resto continua em texto.
@@ -126,6 +127,69 @@ export async function fishBalance(key: string) {
 
 export function isHttpUrl(s: string): boolean {
   return /^https?:\/\//i.test(s.trim());
+}
+
+const VIDEO_EXT = /\.(mp4|webm|mov|m4v|3gp|mkv)(?:[?#].*)?$/i;
+const IMAGE_EXT = /\.(jpe?g|png|webp|gif|bmp|avif)(?:[?#].*)?$/i;
+const MEDIA_URL_RE =
+  /https?:\/\/[^\s<>"']+\.(?:mp4|webm|mov|m4v|3gp|mkv|jpe?g|png|webp|gif|bmp|avif)(?:\?[^\s<>"']*)?/gi;
+
+/** Classifies a URL as native WhatsApp media (plays in-chat) or null (plain link). */
+export function mediaKindForUrl(url: string): "image" | "video" | null {
+  const u = url.trim();
+  if (!isHttpUrl(u)) return null;
+  if (VIDEO_EXT.test(u)) return "video";
+  if (IMAGE_EXT.test(u)) return "image";
+  return null;
+}
+
+/**
+ * Media URLs must EXECUTE inside WhatsApp, never open in a browser tab:
+ * - [LINK: …mp4/gif/jpg] → image/video send
+ * - text that is only a media URL → image/video send
+ * - text with an embedded media URL → split into text + media parts
+ */
+export function normalizeMediaParts(parts: Part[]): Part[] {
+  const out: Part[] = [];
+  for (const p of parts) {
+    if (p.kind === "link") {
+      const k = mediaKindForUrl(p.value);
+      out.push(k ? { kind: k, value: p.value.trim() } : p);
+      continue;
+    }
+    if (p.kind !== "text") {
+      out.push(p);
+      continue;
+    }
+    const text = p.value;
+    // Whole payload is a single media URL.
+    if (/^https?:\/\/\S+$/i.test(text.trim())) {
+      const k = mediaKindForUrl(text);
+      if (k) {
+        out.push({ kind: k, value: text.trim() });
+        continue;
+      }
+    }
+    MEDIA_URL_RE.lastIndex = 0;
+    if (!MEDIA_URL_RE.test(text)) {
+      out.push(p);
+      continue;
+    }
+    // Split embedded media URLs out of the text.
+    MEDIA_URL_RE.lastIndex = 0;
+    let last = 0;
+    let m: RegExpExecArray | null;
+    while ((m = MEDIA_URL_RE.exec(text))) {
+      const before = text.slice(last, m.index).trim();
+      if (before) out.push({ kind: "text", value: before });
+      const k = mediaKindForUrl(m[0]) ?? "link";
+      out.push({ kind: k, value: m[0] });
+      last = m.index + m[0].length;
+    }
+    const tail = text.slice(last).trim();
+    if (tail) out.push({ kind: "text", value: tail });
+  }
+  return out;
 }
 
 /** Generates an image from a text prompt via the user's OpenAI key; returns a data URI. */
@@ -388,8 +452,9 @@ export async function enqueueReply(
   },
   userId: string,
   phone: string,
-  parts: Part[],
+  partsIn: Part[],
 ): Promise<void> {
+  const parts = normalizeMediaParts(partsIn);
   if (!parts.length) return;
   const batchId = crypto.randomUUID();
   const rows = parts.map((p, i) => ({
@@ -543,10 +608,11 @@ async function drainQueue(db: QueueDb, cfg: Cfg, phone: string, deps: QueueDeps)
 export async function deliver(
   cfg: Cfg,
   phone: string,
-  parts: Part[],
+  partsIn: Part[],
   startedAt = Date.now(),
   deps: QueueDeps = {},
 ) {
+  const parts = normalizeMediaParts(partsIn);
   const tts = deps.tts ?? fishTts;
   const send = deps.send ?? wapiSend;
   let first = true;

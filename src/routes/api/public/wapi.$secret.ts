@@ -4,6 +4,7 @@ import {
   enqueueReply,
   isRefusal,
   licenseOk,
+  normalizeMediaParts,
   parseReply,
   processMessageQueue,
   shouldAllowAudio,
@@ -124,7 +125,13 @@ export const Route = createFileRoute("/api/public/wapi/$secret")({
             ]);
 
             const allowAudio = shouldAllowAudio(cfg as Cfg, msgCount, msg.text);
-            const parts = transformPartsForMode(parseReply(reply), cfg as Cfg, allowAudio);
+            // Media URLs become native image/video BEFORE audio-mode transform,
+            // so a gif/mp4 never gets spoken or sent as a clickable link.
+            const parts = transformPartsForMode(
+              normalizeMediaParts(parseReply(reply)),
+              cfg as Cfg,
+              allowAudio,
+            );
             await enqueueReply(supabaseAdmin, cfg.user_id, msg.phone, parts);
             await processMessageQueue(supabaseAdmin, cfg as Cfg, msg.phone);
             if (allowAudio && parts.some((p) => p.kind === "audio")) {

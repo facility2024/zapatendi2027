@@ -10,6 +10,8 @@ import {
   enqueueReply,
   isHttpUrl,
   generateImage,
+  normalizeMediaParts,
+  mediaKindForUrl,
   type Cfg,
 } from "@/lib/bot.server";
 
@@ -527,5 +529,77 @@ describe("image generation", () => {
     });
     expect(genCalls).toBe(0);
     expect(sent).toEqual(["https://a.com/y.jpg"]);
+  });
+});
+
+describe("normalizeMediaParts (media plays in WhatsApp, not as tab link)", () => {
+  const gif = "https://COCONUDIMUDIAL.b-cdn.net/TELEGRAMWEB/sex-standing-23.gif";
+
+  it("classifies urls by extension", () => {
+    expect(mediaKindForUrl(gif)).toBe("image");
+    expect(mediaKindForUrl("https://a.com/v.mp4")).toBe("video");
+    expect(mediaKindForUrl("https://a.com/v.mp4?x=1")).toBe("video");
+    expect(mediaKindForUrl("https://a.com/page.html")).toBeNull();
+    expect(mediaKindForUrl("https://a.com/")).toBeNull();
+  });
+
+  it("converts [LINK: gif/mp4] to native image/video", () => {
+    const out = normalizeMediaParts([
+      { kind: "link", value: gif },
+      { kind: "link", value: "https://a.com/v.mp4" },
+      { kind: "link", value: "https://site.com/promo" },
+    ]);
+    expect(out).toEqual([
+      { kind: "image", value: gif },
+      { kind: "video", value: "https://a.com/v.mp4" },
+      { kind: "link", value: "https://site.com/promo" },
+    ]);
+  });
+
+  it("converts text that is only a media url", () => {
+    const out = normalizeMediaParts([{ kind: "text", value: `olha: ${gif}` }]);
+    expect(out).toEqual([
+      { kind: "text", value: "olha:" },
+      { kind: "image", value: gif },
+    ]);
+  });
+
+  it("splits embedded media urls out of text", () => {
+    const out = normalizeMediaParts([
+      { kind: "text", value: `veja isso https://a.com/x.gif e depois https://a.com/y.mp4 ok` },
+    ]);
+    expect(out).toEqual([
+      { kind: "text", value: "veja isso" },
+      { kind: "image", value: "https://a.com/x.gif" },
+      { kind: "text", value: "e depois" },
+      { kind: "video", value: "https://a.com/y.mp4" },
+      { kind: "text", value: "ok" },
+    ]);
+  });
+
+  it("leaves plain text, audio and generated images untouched", () => {
+    const parts = [
+      { kind: "text" as const, value: "só texto normal" },
+      { kind: "audio" as const, value: "data:audio/mpeg;base64,AAA" },
+      { kind: "image" as const, value: "data:image/png;base64,XXX" },
+      { kind: "video" as const, value: "https://a.com/already.mp4" },
+    ];
+    expect(normalizeMediaParts(parts)).toEqual(parts);
+  });
+
+  it("queue sends gif as native image, not as link text", async () => {
+    const rows: Row[] = [];
+    const db = mockDb(rows);
+    await enqueueReply(db as never, "u", "5516", [{ kind: "link", value: gif }]);
+    const sent: { kind: string; payload: string }[] = [];
+    await processMessageQueue(db as never, qcfg(), "5516", {
+      send: async (_c, kind, _p, payload) => {
+        sent.push({ kind, payload });
+        return "";
+      },
+      sleep: async () => {},
+    });
+    expect(sent).toEqual([{ kind: "image", payload: gif }]);
+    expect(rows[0]!["kind"]).toBe("image");
   });
 });
