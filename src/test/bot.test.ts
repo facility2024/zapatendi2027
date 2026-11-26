@@ -8,6 +8,8 @@ import {
   shouldAllowAudio,
   processMessageQueue,
   enqueueReply,
+  isHttpUrl,
+  generateImage,
   type Cfg,
 } from "@/lib/bot.server";
 
@@ -259,82 +261,82 @@ describe("audio mode", () => {
   });
 });
 
-describe("message queue", () => {
-  type Row = Record<string, unknown> & { id: number; status: string; seq: number };
+type Row = Record<string, unknown> & { id: number; status: string; seq: number };
 
-  function mockDb(rows: Row[]) {
-    return {
-      from: (t: string) => {
-        if (t !== "message_queue") throw new Error(`unexpected table ${t}`);
-        const state = { rows };
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const chain: any = {
-          select: () => chain,
-          insert: (newRows: unknown[]) => {
-            for (const r of newRows as { seq: number }[]) {
-              state.rows.push({
-                id: state.rows.length + 1,
-                status: "pending",
-                attempts: 0,
-                created_at: new Date().toISOString(),
-                ...r,
-              } as Row);
-            }
-            return { error: null };
-          },
-          update: (patch: Record<string, unknown>) => {
-            chain._patch = patch;
-            return chain;
-          },
-          eq: (col: string, val: unknown) => {
-            chain._filters = [...(chain._filters ?? []), [col, val]];
-            return chain;
-          },
-          order: () => chain,
-          limit: () => chain,
-          maybeSingle: async () => {
-            const row = state.rows.find((r) =>
-              (chain._filters ?? []).every(([c, v]: [string, unknown]) => r[c] === v),
-            );
-            if (!row) return { data: null };
-            Object.assign(row, chain._patch);
-            return { data: { ...row } };
-          },
-          then: (resolve: (v: { data: Row[] }) => void) => {
-            let data = state.rows.filter((r) =>
-              (chain._filters ?? []).every(([c, v]: [string, unknown]) => r[c] === v),
-            );
-            if (chain._limit !== undefined) data = data.slice(0, chain._limit);
-            if (chain._patch) {
-              for (const r of data) Object.assign(r, chain._patch);
-              resolve({ data: data.map((r) => ({ ...r })) });
-              chain._patch = undefined;
-              chain._filters = [];
-              return;
-            }
-            resolve({ data: data.map((r) => ({ ...r })) });
-            chain._filters = [];
-            chain._limit = undefined;
-          },
-        };
-        const limit = (n: number) => {
-          chain._limit = n;
+function mockDb(rows: Row[]) {
+  return {
+    from: (t: string) => {
+      if (t !== "message_queue") throw new Error(`unexpected table ${t}`);
+      const state = { rows };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const chain: any = {
+        select: () => chain,
+        insert: (newRows: unknown[]) => {
+          for (const r of newRows as { seq: number }[]) {
+            state.rows.push({
+              id: state.rows.length + 1,
+              status: "pending",
+              attempts: 0,
+              created_at: new Date().toISOString(),
+              ...r,
+            } as Row);
+          }
+          return { error: null };
+        },
+        update: (patch: Record<string, unknown>) => {
+          chain._patch = patch;
           return chain;
-        };
-        chain.limit = limit;
+        },
+        eq: (col: string, val: unknown) => {
+          chain._filters = [...(chain._filters ?? []), [col, val]];
+          return chain;
+        },
+        order: () => chain,
+        limit: () => chain,
+        maybeSingle: async () => {
+          const row = state.rows.find((r) =>
+            (chain._filters ?? []).every(([c, v]: [string, unknown]) => r[c] === v),
+          );
+          if (!row) return { data: null };
+          Object.assign(row, chain._patch);
+          return { data: { ...row } };
+        },
+        then: (resolve: (v: { data: Row[] }) => void) => {
+          let data = state.rows.filter((r) =>
+            (chain._filters ?? []).every(([c, v]: [string, unknown]) => r[c] === v),
+          );
+          if (chain._limit !== undefined) data = data.slice(0, chain._limit);
+          if (chain._patch) {
+            for (const r of data) Object.assign(r, chain._patch);
+            resolve({ data: data.map((r) => ({ ...r })) });
+            chain._patch = undefined;
+            chain._filters = [];
+            return;
+          }
+          resolve({ data: data.map((r) => ({ ...r })) });
+          chain._filters = [];
+          chain._limit = undefined;
+        },
+      };
+      const limit = (n: number) => {
+        chain._limit = n;
         return chain;
-      },
-      _rows: rows,
-    };
-  }
+      };
+      chain.limit = limit;
+      return chain;
+    },
+    _rows: rows,
+  };
+}
 
-  const qcfg = (over: Partial<Cfg> = {}): Cfg => ({
-    ...cfg(),
-    delay_enabled: true,
-    delay_seconds: 0,
-    ...over,
-  });
+const qcfg = (over: Partial<Cfg> = {}): Cfg => ({
+  ...cfg(),
+  delay_enabled: true,
+  delay_seconds: 0,
+  ...over,
+});
 
+describe("message queue", () => {
   it("sends parts strictly in order and marks them sent", async () => {
     const rows: Row[] = [];
     const db = mockDb(rows);
@@ -433,5 +435,97 @@ describe("message queue", () => {
       sleep: async () => {},
     });
     expect(sent).toEqual([]);
+  });
+});
+
+describe("image generation", () => {
+  it("detects http urls vs generation prompts", () => {
+    expect(isHttpUrl("https://a.com/x.jpg")).toBe(true);
+    expect(isHttpUrl("http://a.com/x.png")).toBe(true);
+    expect(isHttpUrl("a cute corgi wearing sunglasses")).toBe(false);
+    expect(isHttpUrl("/relative/path.png")).toBe(false);
+  });
+
+  it("generateImage returns a data URI from OpenAI b64", async () => {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ data: [{ b64_json: "QUFBQQ==" }] }),
+      } as Response),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const out = await generateImage(cfg({ openai_key: "sk-test" }), "a red balloon");
+    expect(out).toBe("data:image/png;base64,QUFBQQ==");
+    const call = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const body = JSON.parse(call[1].body as string) as {
+      prompt: string;
+      response_format: string;
+    };
+    expect(body.prompt).toBe("a red balloon");
+    expect(body.response_format).toBe("b64_json");
+  });
+
+  it("queue generates image when payload is a prompt (image_gen on)", async () => {
+    const rows: Row[] = [];
+    const db = mockDb(rows);
+    await enqueueReply(db as never, "u", "5513", [
+      { kind: "image", value: "a cute corgi wearing sunglasses" },
+      { kind: "text", value: "olha só!" },
+    ]);
+    const sent: { kind: string; payload: string }[] = [];
+    await processMessageQueue(db as never, cfg({ image_gen: true }), "5513", {
+      genImage: async () => "data:image/png;base64,QUFBQQ==",
+      send: async (_c, kind, _p, payload) => {
+        sent.push({ kind, payload });
+        return "";
+      },
+      sleep: async () => {},
+    });
+    expect(sent).toEqual([
+      { kind: "image", payload: "data:image/png;base64,QUFBQQ==" },
+      { kind: "text", payload: "olha só!" },
+    ]);
+  });
+
+  it("queue keeps url images untouched", async () => {
+    const rows: Row[] = [];
+    const db = mockDb(rows);
+    await enqueueReply(db as never, "u", "5514", [{ kind: "image", value: "https://a.com/x.jpg" }]);
+    const sent: string[] = [];
+    let genCalls = 0;
+    await processMessageQueue(db as never, cfg({ image_gen: true }), "5514", {
+      genImage: async () => {
+        genCalls++;
+        return "data:image/png;base64,XXX";
+      },
+      send: async (_c, _k, _p, payload) => {
+        sent.push(payload);
+        return "";
+      },
+      sleep: async () => {},
+    });
+    expect(genCalls).toBe(0);
+    expect(sent).toEqual(["https://a.com/x.jpg"]);
+  });
+
+  it("queue does not generate when image_gen is off (sends prompt as-is for manual URL flow)", async () => {
+    const rows: Row[] = [];
+    const db = mockDb(rows);
+    await enqueueReply(db as never, "u", "5515", [{ kind: "image", value: "https://a.com/y.jpg" }]);
+    const sent: string[] = [];
+    let genCalls = 0;
+    await processMessageQueue(db as never, cfg({ image_gen: false }), "5515", {
+      genImage: async () => {
+        genCalls++;
+        return "data:image/png;base64,XXX";
+      },
+      send: async (_c, _k, _p, payload) => {
+        sent.push(payload);
+        return "";
+      },
+      sleep: async () => {},
+    });
+    expect(genCalls).toBe(0);
+    expect(sent).toEqual(["https://a.com/y.jpg"]);
   });
 });

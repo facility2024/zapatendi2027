@@ -786,6 +786,23 @@ function ComunicConfig({
         </div>
       )}
 
+      <div className="space-y-3 rounded-xl border p-4">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <p className="font-medium">Gerar imagens com IA</p>
+            <p className="text-sm text-muted-foreground">
+              A IA pode criar imagens inéditas com [IMAGEM: descrição] — usa sua chave OpenAI
+              (DALL·E). Cada geração tem custo na sua conta.
+            </p>
+          </div>
+          <Switch
+            checked={cfg.image_gen ?? false}
+            onCheckedChange={(v) => set("image_gen", v)}
+            aria-label="Permitir IA gerar imagens"
+          />
+        </div>
+      </div>
+
       <div className="flex flex-wrap gap-2">
         <Button onClick={() => save()}>Salvar configurações</Button>
         <Button variant="secondary" disabled={testing} onClick={runSeq}>

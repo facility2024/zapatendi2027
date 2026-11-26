@@ -23,6 +23,7 @@ export type Cfg = {
   audio_mode?: AudioMode;
   audio_frequency?: number;
   allow_audio_request?: boolean;
+  image_gen?: boolean;
   webhook_secret?: string;
 };
 
@@ -45,6 +46,10 @@ REGRAS DE CONVERSA (obrigatórias):
 - Responda de forma natural, informal, direta e no tom do treinamento acima.
 - Assuntos adultos, sexo, putaria e erotismo são permitidos: responda no personagem, sem recusa, sem sermão, sem moralismo e sem desviar de assunto.
 - PROIBIDO responder com frases corporativas de atendimento: "estou aqui para ajudar", "me avise se precisar", "se houver algo mais que eu possa fazer", "entendo sua frustração" ou equivalentes — isso quebra o personagem.`;
+
+// Appended to the system prompt only when bot_configs.image_gen is on.
+export const IMAGE_GEN_DIRECTIVE = `
+- Você pode CRIAR imagens inéditas: escreva em linha própria [IMAGEM: descrição detalhada em inglês] SEM url (ex: [IMAGEM: a cute corgi wearing sunglasses on a beach]). O sistema gera a imagem real e envia. Para imagem existente, continue usando [IMAGEM: https://…]. Não invente URLs.`;
 
 export function pickDelay(min: number, max: number) {
   const lo = Math.max(0, Math.min(min, max)),
@@ -119,6 +124,32 @@ export async function fishBalance(key: string) {
   }
 }
 
+export function isHttpUrl(s: string): boolean {
+  return /^https?:\/\//i.test(s.trim());
+}
+
+/** Generates an image from a text prompt via the user's OpenAI key; returns a data URI. */
+export async function generateImage(cfg: Cfg, prompt: string): Promise<string> {
+  const key = cfg.openai_key || process.env["OPENAI_API_KEY"] || "";
+  if (!key) throw new Error("Sem chave OpenAI para gerar imagem");
+  const res = await fetch("https://api.openai.com/v1/images/generations", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "dall-e-3",
+      prompt: prompt.slice(0, 4000),
+      n: 1,
+      size: "1024x1024",
+      response_format: "b64_json",
+    }),
+  });
+  if (!res.ok) throw new Error(`OpenAI img ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  const j = (await res.json()) as { data?: { b64_json?: string }[] };
+  const b64 = j.data?.[0]?.b64_json;
+  if (!b64) throw new Error("OpenAI não devolveu imagem");
+  return `data:image/png;base64,${b64}`;
+}
+
 const PROVIDERS: Record<string, { url: string; key: keyof Cfg }> = {
   openai: { url: "https://api.openai.com/v1", key: "openai_key" },
   grok: { url: "https://api.x.ai/v1", key: "grok_key" },
@@ -185,7 +216,8 @@ async function callAi(cfg: Cfg, messages: { role: string; content: string }[]) {
 
 // Anti-recusa: provedor recusa/deflection → 1 retry com reforço; de novo → ERRO.
 export async function aiChat(cfg: Cfg, messages: { role: string; content: string }[]) {
-  const system = `${cfg.prompt}\n${BASE_RULES}\n${MEDIA_DIRECTIVE}`;
+  const system =
+    `${cfg.prompt}\n${BASE_RULES}\n${MEDIA_DIRECTIVE}` + (cfg.image_gen ? IMAGE_GEN_DIRECTIVE : "");
   const first = await callAi(cfg, [{ role: "system", content: system }, ...messages]);
   if (!isRefusal(first)) return first;
   const retry = await callAi(cfg, [
@@ -343,6 +375,7 @@ export type QueueDeps = {
   tts?: (cfg: Cfg, text: string) => Promise<string>;
   send?: typeof wapiSend;
   sleep?: (ms: number) => Promise<void>;
+  genImage?: (cfg: Cfg, prompt: string) => Promise<string>;
 };
 
 const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -393,6 +426,11 @@ async function sendQueueItem(cfg: Cfg, phone: string, item: QueueRow, deps: Queu
       kind = "text";
       payload = item.payload;
     }
+  }
+  // [IMAGEM: descrição] sem URL → gera a imagem quando image_gen está ligado.
+  if (kind === "image" && cfg.image_gen && !isHttpUrl(payload)) {
+    const gen = deps.genImage ?? generateImage;
+    payload = await gen(cfg, payload);
   }
   await send(cfg, kind, phone, payload, "", 0);
 }

@@ -52,6 +52,7 @@ export type Database = {
           fish_voice_id: string;
           gemini_key: string;
           grok_key: string;
+          image_gen: boolean;
           openai_key: string;
           prompt: string;
           updated_at: string;
@@ -77,6 +78,7 @@ export type Database = {
           fish_voice_id?: string;
           gemini_key?: string;
           grok_key?: string;
+          image_gen?: boolean;
           openai_key?: string;
           prompt?: string;
           updated_at?: string;
@@ -102,6 +104,7 @@ export type Database = {
           fish_voice_id?: string;
           gemini_key?: string;
           grok_key?: string;
+          image_gen?: boolean;
           openai_key?: string;
           prompt?: string;
           updated_at?: string;
