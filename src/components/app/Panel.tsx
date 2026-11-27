@@ -22,6 +22,7 @@ import {
   Wifi,
   Trash2,
   Wallet,
+  DollarSign,
   ShieldCheck,
   QrCode,
   RefreshCw,
@@ -31,6 +32,7 @@ import {
 import {
   getConnection,
   getFishBalance,
+  getOpenAiCosts,
   getQrCode,
   setupWebhook,
   testAi,
@@ -47,6 +49,7 @@ type Cfg = Tables<"bot_configs">;
 export function Panel({ userId, email }: { userId: string; email: string }) {
   const qc = useQueryClient();
   const fishFn = useServerFn(getFishBalance);
+  const costsFn = useServerFn(getOpenAiCosts);
   const aiFn = useServerFn(testAi);
   const waFn = useServerFn(testWhatsapp);
   const qrFn = useServerFn(getQrCode);
@@ -118,6 +121,12 @@ export function Panel({ userId, email }: { userId: string; email: string }) {
   useEffect(() => {
     if (data?.cfg) setCfg(data.cfg);
   }, [data?.cfg]);
+  const costs = useQuery({
+    queryKey: ["openai-costs", userId, cfg?.openai_admin_key],
+    queryFn: () => costsFn(),
+    refetchInterval: 60000,
+    enabled: !!cfg?.openai_admin_key,
+  });
   const [phone, setPhone] = useState("");
   const [sending, setSending] = useState<string | null>(null);
   const [testVal, setTestVal] = useState({
@@ -151,6 +160,7 @@ export function Panel({ userId, email }: { userId: string; email: string }) {
     toast.success("Salvo");
     setCfg(next);
     qc.invalidateQueries({ queryKey: ["fish", userId] });
+    qc.invalidateQueries({ queryKey: ["openai-costs", userId] });
   }
   async function hookNow() {
     const r = await hookFn();
@@ -217,7 +227,7 @@ export function Panel({ userId, email }: { userId: string; email: string }) {
         </Button>
       </header>
 
-      <div className="grid gap-4 sm:grid-cols-3">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Stat
           icon={<ShieldCheck />}
           label="Licença"
@@ -243,6 +253,27 @@ export function Panel({ userId, email }: { userId: string; email: string }) {
                   : "—"
           }
           sub="Atualiza a cada minuto"
+        />
+        <Stat
+          icon={<DollarSign />}
+          label="Gasto OpenAI (mês)"
+          good={!!costs.data?.ok}
+          value={
+            costs.isLoading
+              ? "…"
+              : costs.data?.ok
+                ? `US$ ${costs.data.month.toFixed(2)}`
+                : costs.data && !costs.data.ok
+                  ? costs.data.error
+                  : "—"
+          }
+          sub={
+            costs.data?.ok
+              ? `Hoje: US$ ${costs.data.today.toFixed(2)} · atualiza a cada minuto`
+              : cfg.openai_admin_key
+                ? ""
+                : "Sem chave admin — configure na aba IA"
+          }
         />
         <div className="flex items-center justify-between rounded-xl border bg-card p-4 shadow-glow">
           <div>
@@ -452,6 +483,24 @@ export function Panel({ userId, email }: { userId: string; email: string }) {
                 </Button>
               </div>
             ))}
+            {field(
+              "openai_admin_key",
+              "Chave admin OpenAI (sk-admin-… — só para ler o gasto no card)",
+              "password",
+            )}
+            <p className="text-xs text-muted-foreground">
+              Criar em{" "}
+              <a
+                href="https://platform.openai.com/settings/organization/admin-keys"
+                target="_blank"
+                rel="noreferrer"
+                className="underline"
+              >
+                platform.openai.com → Settings → Organization → Admin keys
+              </a>{" "}
+              (só o Owner da organização). A chave comum sk- não serve — a OpenAI retorna 403. A
+              chave admin não chama modelos, só lê custos.
+            </p>
             <Button onClick={() => save()}>Salvar</Button>
           </Card>
         </TabsContent>

@@ -7,6 +7,8 @@ export type Cfg = {
   wapi_token: string;
   wapi_base_url: string;
   openai_key: string;
+  /** OpenAI Admin key (sk-admin-…) — only reads costs; never used for chat. */
+  openai_admin_key?: string;
   grok_key: string;
   gemini_key: string;
   ai_provider: string;
@@ -151,6 +153,81 @@ export async function fishBalance(key: string) {
   } catch {
     return { ok: false as const, error: "Resposta inválida" };
   }
+}
+
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
+/**
+ * Sums OpenAI Costs API daily buckets (`data[].results[].amount`) → total for
+ * the queried period and for the bucket covering `now`. Only `usd` counts.
+ */
+export function sumCostBuckets(
+  payload: unknown,
+  now = Date.now(),
+): { month: number; today: number } {
+  const nowSec = Math.floor(now / 1000);
+  const data = (payload as { data?: unknown } | null)?.data;
+  if (!Array.isArray(data)) return { month: 0, today: 0 };
+  let month = 0;
+  let today = 0;
+  for (const raw of data) {
+    const bucket = raw as {
+      start_time?: number;
+      end_time?: number;
+      results?: { amount?: { value?: number; currency?: string } }[];
+    };
+    if (!Array.isArray(bucket.results)) continue;
+    let sum = 0;
+    for (const r of bucket.results) {
+      const amount = r?.amount;
+      if (!amount || typeof amount.value !== "number") continue;
+      if (amount.currency && amount.currency !== "usd") continue;
+      sum += amount.value;
+    }
+    month += sum;
+    if (
+      typeof bucket.start_time === "number" &&
+      typeof bucket.end_time === "number" &&
+      bucket.start_time <= nowSec &&
+      nowSec < bucket.end_time
+    ) {
+      today = sum;
+    }
+  }
+  return { month: round2(month), today: round2(today) };
+}
+
+/**
+ * OpenAI Costs API — daily buckets, published with minutes/hours of lag
+ * (no provider exposes second-level spend). Requires an Admin key
+ * (sk-admin-…); a regular sk- key returns 403 (verified against the API).
+ */
+export async function fetchOpenAiCosts(
+  adminKey: string,
+): Promise<{ ok: true; month: number; today: number } | { ok: false; error: string }> {
+  const now = new Date();
+  const start = Math.floor(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1) / 1000);
+  let res: Response;
+  try {
+    res = await fetch(
+      `https://api.openai.com/v1/organization/costs?start_time=${start}&bucket_width=1d&limit=31`,
+      {
+        headers: { Authorization: `Bearer ${adminKey}` },
+        signal: AbortSignal.timeout(15_000),
+      },
+    );
+  } catch {
+    return { ok: false, error: "OpenAI não respondeu (rede/timeout)" };
+  }
+  if (res.status === 401) return { ok: false, error: "Chave admin inválida" };
+  if (res.status === 403)
+    return { ok: false, error: "Precisa ser Admin key (sk-admin-) com leitura de Costs" };
+  if (res.status === 429)
+    return { ok: false, error: "Muitas consultas à OpenAI — tente em instantes" };
+  if (!res.ok) return { ok: false, error: `OpenAI respondeu ${res.status}` };
+  const j = await res.json().catch(() => null);
+  const { month, today } = sumCostBuckets(j);
+  return { ok: true, month, today };
 }
 
 export function isHttpUrl(s: string): boolean {

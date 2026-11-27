@@ -54,6 +54,7 @@ export type Database = {
           grok_key: string;
           image_gen: boolean;
           openai_key: string;
+          openai_admin_key: string;
           prompt: string;
           updated_at: string;
           user_id: string;
@@ -80,6 +81,7 @@ export type Database = {
           grok_key?: string;
           image_gen?: boolean;
           openai_key?: string;
+          openai_admin_key?: string;
           prompt?: string;
           updated_at?: string;
           user_id: string;
@@ -106,6 +108,7 @@ export type Database = {
           grok_key?: string;
           image_gen?: boolean;
           openai_key?: string;
+          openai_admin_key?: string;
           prompt?: string;
           updated_at?: string;
           user_id?: string;

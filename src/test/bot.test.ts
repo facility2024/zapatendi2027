@@ -17,6 +17,8 @@ import {
   extractIncoming,
   resolveIncomingText,
   transcribers,
+  sumCostBuckets,
+  fetchOpenAiCosts,
   type Cfg,
 } from "@/lib/bot.server";
 
@@ -819,5 +821,110 @@ describe("resolveIncomingText", () => {
     expect(t).toBe("[figurinha recebida]");
     expect(spy).not.toHaveBeenCalled();
     spy.mockRestore();
+  });
+});
+
+describe("sumCostBuckets", () => {
+  const now = Date.UTC(2026, 10, 27, 12, 0, 0); // 27/11/2026 12:00 UTC
+  const day = (y: number, m: number, d: number) => Date.UTC(y, m, d) / 1000;
+
+  it("sums the whole period and only the bucket covering now for today", () => {
+    const payload = {
+      data: [
+        {
+          start_time: day(2026, 10, 1),
+          end_time: day(2026, 10, 2),
+          results: [{ amount: { value: 0.1, currency: "usd" } }],
+        },
+        {
+          start_time: day(2026, 10, 26),
+          end_time: day(2026, 10, 27),
+          results: [{ amount: { value: 0.05, currency: "usd" } }],
+        },
+        {
+          start_time: day(2026, 10, 27),
+          end_time: day(2026, 10, 28),
+          results: [
+            { amount: { value: 0.2, currency: "usd" } },
+            { amount: { value: 99, currency: "eur" } },
+            { amount: { value: 0.3 } },
+          ],
+        },
+      ],
+    };
+    expect(sumCostBuckets(payload, now)).toEqual({ month: 0.65, today: 0.5 });
+  });
+
+  it("returns zeros for empty or malformed payloads", () => {
+    expect(sumCostBuckets(null, now)).toEqual({ month: 0, today: 0 });
+    expect(sumCostBuckets({}, now)).toEqual({ month: 0, today: 0 });
+    expect(sumCostBuckets({ data: "nope" }, now)).toEqual({ month: 0, today: 0 });
+    expect(sumCostBuckets({ data: [{ results: "bad" }] }, now)).toEqual({ month: 0, today: 0 });
+  });
+
+  it("rounds to cents", () => {
+    const payload = {
+      data: [
+        {
+          start_time: day(2026, 10, 27),
+          end_time: day(2026, 10, 28),
+          results: [{ amount: { value: 0.105, currency: "usd" } }],
+        },
+      ],
+    };
+    expect(sumCostBuckets(payload, now)).toEqual({ month: 0.11, today: 0.11 });
+  });
+});
+
+describe("fetchOpenAiCosts", () => {
+  it("maps 403 to the admin-key message (regular sk- keys get 403)", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 403 }));
+    const r = await fetchOpenAiCosts("sk-regular");
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain("Admin");
+    vi.unstubAllGlobals();
+  });
+
+  it("maps 401 to an invalid-key message", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 401 }));
+    const r = await fetchOpenAiCosts("sk-admin-bad");
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain("inválida");
+    vi.unstubAllGlobals();
+  });
+
+  it("returns month and today on success", async () => {
+    const start = Math.floor(
+      Date.UTC(new Date().getUTCFullYear(), new Date().getUTCMonth(), 1) / 1000,
+    );
+    const todayStart = Math.floor(Date.now() / 1000 / 86400) * 86400;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: [
+            {
+              start_time: start,
+              end_time: start + 86400,
+              results: [{ amount: { value: 1.25, currency: "usd" } }],
+            },
+            {
+              start_time: todayStart,
+              end_time: todayStart + 86400,
+              results: [{ amount: { value: 0.4, currency: "usd" } }],
+            },
+          ],
+        }),
+      }),
+    );
+    const r = await fetchOpenAiCosts("sk-admin-ok");
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.month).toBe(1.65);
+      expect(r.today).toBe(0.4);
+    }
+    vi.unstubAllGlobals();
   });
 });

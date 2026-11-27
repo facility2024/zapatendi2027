@@ -5,6 +5,7 @@ import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import {
   fishKey,
   fishBalance,
+  fetchOpenAiCosts,
   testAiKey,
   wapiSend,
   wapiQr,
@@ -33,6 +34,17 @@ export const getFishBalance = createServerFn({ method: "POST" })
     const key = fishKey(cfg);
     if (!key) return { ok: false as const, error: "Sem chave Fish Audio" };
     return fishBalance(key);
+  });
+
+// OpenAI spend (month + today) via the Costs API. Needs an Admin key
+// (sk-admin-…) in bot_configs.openai_admin_key — a regular sk- key is 403.
+export const getOpenAiCosts = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    const cfg = await loadCfg(context.supabase, context.userId);
+    const key = cfg.openai_admin_key ?? "";
+    if (!key) return { ok: false as const, error: "Sem chave admin da OpenAI" };
+    return fetchOpenAiCosts(key);
   });
 
 export const testAi = createServerFn({ method: "POST" })
