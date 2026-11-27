@@ -13,6 +13,7 @@ import {
   normalizeMediaParts,
   mediaKindForUrl,
   wapiSend,
+  gifConverters,
   type Cfg,
 } from "@/lib/bot.server";
 
@@ -634,7 +635,54 @@ describe("normalizeMediaParts (media plays in WhatsApp, not as tab link)", () =>
     expect(rows[0]!["kind"]).toBe("image");
   });
 
-  it("wapiSend routes .gif images to send-gif endpoint (WhatsApp rejects gif in send-image)", async () => {
+  it("wapiSend converts .gif → mp4 then sends via send-gif (W-API rejects raw gif)", async () => {
+    const orig = gifConverters.convert;
+    gifConverters.convert = async () => "https://supa.co/storage/v1/object/public/media/x.mp4";
+    try {
+      const fetchMock = vi.fn((..._args: unknown[]) =>
+        Promise.resolve({ ok: true, text: () => Promise.resolve("{}") } as Response),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      await wapiSend(
+        cfg({ wapi_instance_id: "inst1", wapi_token: "tok" }),
+        "image",
+        "5511999999999",
+        gif,
+      );
+      const firstCall = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+      expect(firstCall[0]).toContain("/message/send-gif");
+      const body = JSON.parse(firstCall[1].body as string) as { gif: string; phone: string };
+      expect(body.gif).toBe("https://supa.co/storage/v1/object/public/media/x.mp4");
+
+      // send-gif fails → falls back to send-video with the same mp4.
+      fetchMock.mockClear();
+      fetchMock
+        .mockImplementationOnce(() =>
+          Promise.resolve({
+            ok: false,
+            text: () => Promise.resolve('{"message":"fail"}'),
+          } as Response),
+        )
+        .mockImplementationOnce(() =>
+          Promise.resolve({ ok: true, text: () => Promise.resolve("{}") } as Response),
+        );
+      await wapiSend(
+        cfg({ wapi_instance_id: "inst1", wapi_token: "tok" }),
+        "image",
+        "5511999999999",
+        gif,
+      );
+      const videoCall = fetchMock.mock.calls[1] as unknown as [string, RequestInit];
+      expect(videoCall[0]).toContain("/message/send-video");
+      const videoBody = JSON.parse(videoCall[1].body as string) as { video: string };
+      expect(videoBody.video).toContain(".mp4");
+    } finally {
+      gifConverters.convert = orig;
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("non-gif images still use send-image", async () => {
     const fetchMock = vi.fn((..._args: unknown[]) =>
       Promise.resolve({ ok: true, text: () => Promise.resolve("{}") } as Response),
     );
@@ -643,23 +691,11 @@ describe("normalizeMediaParts (media plays in WhatsApp, not as tab link)", () =>
       cfg({ wapi_instance_id: "inst1", wapi_token: "tok" }),
       "image",
       "5511999999999",
-      gif,
-    );
-    const firstCall = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    expect(firstCall[0]).toContain("/message/send-gif");
-    const body = JSON.parse(firstCall[1].body as string) as { gif: string; phone: string };
-    expect(body.gif).toBe(gif);
-
-    // Non-gif images still use send-image.
-    fetchMock.mockClear();
-    await wapiSend(
-      cfg({ wapi_instance_id: "inst1", wapi_token: "tok" }),
-      "image",
-      "5511999999999",
       "https://a.com/photo.jpg",
     );
-    const secondCall = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    expect(secondCall[0]).toContain("/message/send-image");
+    const call = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(call[0]).toContain("/message/send-image");
+    vi.unstubAllGlobals();
   });
 
   it("releases the conversation lock when a drain hangs (bot freeze regression)", async () => {

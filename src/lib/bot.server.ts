@@ -68,27 +68,14 @@ export async function wapiSend(
   delay?: number,
 ) {
   const base = (cfg.wapi_base_url || "https://api.w-api.app/v1").replace(/\/$/, "");
-  // WhatsApp não aceita .gif em send-image (só JPEG/PNG) — a W-API tem
-  // endpoint próprio send-gif; sem ele a mídia falha na fila e vaza texto.
-  const isGif = kind === "image" && /\.gif(?:[?#]|$)/i.test(payload.trim());
-  const map = {
-    text: ["send-text", { phone, message: payload }],
-    link: ["send-text", { phone, message: caption ? `${caption}\n${payload}` : payload }],
-    image: isGif
-      ? (["send-gif", { phone, gif: payload, caption }] as const)
-      : (["send-image", { phone, image: payload, caption }] as const),
-    video: ["send-video", { phone, video: payload, caption }],
-    audio: ["send-audio", { phone, audio: payload }],
-  } as const;
-  const [path, b] = map[kind];
-  const body = delay === undefined ? b : { ...b, delayMessage: delay };
-  const doSend = async (ep: string, payload: unknown) => {
+  const isGif = kind === "image" && isGifUrl(payload);
+  const doSend = async (ep: string, body: unknown) => {
     const res = await fetch(
       `${base}/message/${ep}?instanceId=${encodeURIComponent(cfg.wapi_instance_id)}`,
       {
         method: "POST",
         headers: { Authorization: `Bearer ${cfg.wapi_token}`, "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(body),
         signal: AbortSignal.timeout(30_000),
       },
     );
@@ -96,22 +83,37 @@ export async function wapiSend(
     if (!res.ok) throw new Error(`W-API ${res.status}: ${text.slice(0, 300)}`);
     return text;
   };
+
   if (isGif) {
-    // send-gif pode não existir (404) ou exigir MP4; send-image pode recusar
-    // .gif. Tenta os dois e só então falha — com log para debugar nos Logs.
+    // A W-API recusa .gif puro (send-gif exige MP4; send-image só jpg/png).
+    // Converte GIF→MP4 (ffmpeg + Storage) e envia como GIF nativo do WhatsApp.
+    const mp4Url = await gifConverters.convert(payload.trim());
+    const gifBody = { phone, gif: mp4Url, caption };
     try {
-      return await doSend("send-gif", b);
+      return await doSend(
+        "send-gif",
+        delay === undefined ? gifBody : { ...gifBody, delayMessage: delay },
+      );
     } catch (e1) {
-      console.error("send-gif failed, trying send-image:", e1);
-      try {
-        return await doSend("send-image", { phone, image: payload, caption });
-      } catch (e2) {
-        console.error("send-image fallback also failed for gif:", e2);
-        throw e2;
-      }
+      console.error("send-gif failed with mp4, trying send-video:", e1);
+      const videoBody = { phone, video: mp4Url, caption };
+      return await doSend(
+        "send-video",
+        delay === undefined ? videoBody : { ...videoBody, delayMessage: delay },
+      );
     }
   }
-  return await doSend(path, b);
+
+  const map = {
+    text: ["send-text", { phone, message: payload }],
+    link: ["send-text", { phone, message: caption ? `${caption}\n${payload}` : payload }],
+    image: ["send-image", { phone, image: payload, caption }],
+    video: ["send-video", { phone, video: payload, caption }],
+    audio: ["send-audio", { phone, audio: payload }],
+  } as const;
+  const [path, b] = map[kind];
+  const body = delay === undefined ? b : { ...b, delayMessage: delay };
+  return await doSend(path, body);
 }
 
 export function fishKey(cfg: Cfg) {
@@ -154,6 +156,59 @@ export async function fishBalance(key: string) {
 export function isHttpUrl(s: string): boolean {
   return /^https?:\/\//i.test(s.trim());
 }
+
+export function isGifUrl(s: string): boolean {
+  return /^https?:\/\/\S+\.gif(?:[?#]\S*)?$/i.test(s.trim());
+}
+
+/**
+ * W-API rejects raw .gif (send-gif wants MP4; send-image wants jpg/png).
+ * Download the gif, convert to MP4 with ffmpeg, upload to Supabase Storage
+ * (public bucket `media`) and return the .mp4 URL.
+ */
+export async function gifToMp4Url(gifUrl: string): Promise<string> {
+  const res = await fetch(gifUrl, { signal: AbortSignal.timeout(30_000) });
+  if (!res.ok) throw new Error(`download do gif falhou: HTTP ${res.status}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  const { execFile } = await import("node:child_process");
+  const { mkdtemp, readFile, writeFile, unlink, rmdir } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = await mkdtemp(join(tmpdir(), "gif-"));
+  const inFile = join(dir, "in.gif");
+  const outFile = join(dir, "out.mp4");
+  await writeFile(inFile, buf);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      execFile(
+        "ffmpeg",
+        ["-y", "-i", inFile, "-movflags", "+faststart", "-pix_fmt", "yuv420p", outFile],
+        { timeout: 60_000 },
+        (err) => (err ? reject(new Error(`ffmpeg: ${err.message}`)) : resolve()),
+      );
+    });
+    const mp4 = await readFile(outFile);
+    const supaUrl = process.env["SUPABASE_URL"];
+    const serviceKey = process.env["SUPABASE_SERVICE_ROLE_KEY"];
+    if (!supaUrl || !serviceKey) throw new Error("SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY ausentes");
+    const objectPath = `gif-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.mp4`;
+    const up = await fetch(`${supaUrl}/storage/v1/object/media/${objectPath}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${serviceKey}`, "Content-Type": "video/mp4" },
+      body: new Uint8Array(mp4),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!up.ok) throw new Error(`upload storage ${up.status}: ${(await up.text()).slice(0, 200)}`);
+    return `${supaUrl}/storage/v1/object/public/media/${objectPath}`;
+  } finally {
+    await unlink(inFile).catch(() => {});
+    await unlink(outFile).catch(() => {});
+    await rmdir(dir).catch(() => {});
+  }
+}
+
+// Test seam: swap the gif converter without ffmpeg/storage.
+export const gifConverters = { convert: gifToMp4Url };
 
 const VIDEO_EXT = /\.(mp4|webm|mov|m4v|3gp|mkv)(?:[?#].*)?$/i;
 const IMAGE_EXT = /\.(jpe?g|png|webp|gif|bmp|avif)(?:[?#].*)?$/i;

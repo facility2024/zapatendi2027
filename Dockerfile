@@ -14,6 +14,10 @@ FROM node:22-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000
+# ffmpeg converts .gif → .mp4 (W-API rejects raw gif in send-gif/send-image)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/.output ./.output
 COPY --from=builder /app/public ./public
 EXPOSE 3000
