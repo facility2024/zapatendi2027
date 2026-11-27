@@ -97,12 +97,18 @@ export async function wapiSend(
     return text;
   };
   if (isGif) {
-    // send-gif pode não existir no plano da instância → cai para send-image.
+    // send-gif pode não existir (404) ou exigir MP4; send-image pode recusar
+    // .gif. Tenta os dois e só então falha — com log para debugar nos Logs.
     try {
       return await doSend("send-gif", b);
-    } catch (e) {
-      if (!(e instanceof Error) || !/^W-API 4\d\d/.test(e.message)) throw e;
-      return await doSend("send-image", { phone, image: payload, caption });
+    } catch (e1) {
+      console.error("send-gif failed, trying send-image:", e1);
+      try {
+        return await doSend("send-image", { phone, image: payload, caption });
+      } catch (e2) {
+        console.error("send-image fallback also failed for gif:", e2);
+        throw e2;
+      }
     }
   }
   return await doSend(path, b);
@@ -673,8 +679,10 @@ async function drainQueue(db: QueueDb, cfg: Cfg, phone: string, deps: QueueDeps)
         .update({ status: "sent", sent_at: new Date().toISOString(), error: null })
         .eq("id", claimed.id)
         .eq("status", "processing");
+      console.log(`queue sent kind=${claimed.kind} phone=${phone}`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      console.error(`queue send failed kind=${claimed.kind} attempt=${claimed.attempts}:`, msg);
       if (claimed.kind === "audio") {
         await db.from("message_queue").update({ status: "error", error: msg }).eq("id", claimed.id);
         await db
@@ -687,6 +695,7 @@ async function drainQueue(db: QueueDb, cfg: Cfg, phone: string, deps: QueueDeps)
         return;
       }
       if ((claimed.attempts ?? 1) >= 3) {
+        console.error(`queue item permanently failed phone=${phone}:`, msg);
         await db.from("message_queue").update({ status: "error", error: msg }).eq("id", claimed.id);
       } else {
         await db

@@ -140,6 +140,10 @@ export const Route = createFileRoute("/api/public/wapi/$secret")({
                 cfg as Cfg,
                 allowAudio,
               );
+              console.log(
+                "wapi parts:",
+                parts.map((p) => `${p.kind}(${p.value.slice(0, 60)})`).join(" | ") || "(vazio)",
+              );
               await enqueueReply(supabaseAdmin, cfg.user_id, msg.phone, parts);
               await processMessageQueue(supabaseAdmin, cfg as Cfg, msg.phone);
               if (allowAudio && parts.some((p) => p.kind === "audio")) {
