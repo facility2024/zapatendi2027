@@ -2,11 +2,13 @@ import { createFileRoute } from "@tanstack/react-router";
 import {
   aiChat,
   enqueueReply,
+  extractIncoming,
   isRefusal,
   licenseOk,
   normalizeMediaParts,
   parseReply,
   processMessageQueue,
+  resolveIncomingText,
   shouldAllowAudio,
   transformPartsForMode,
   type Cfg,
@@ -14,26 +16,6 @@ import {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Any = any;
-function extract(b: Any) {
-  if (b?.fromMe || b?.data?.fromMe || b?.key?.fromMe) return null;
-  const isGroup = b?.isGroup || String(b?.chat?.id ?? "").includes("@g.us");
-  if (isGroup) return null;
-  const text =
-    b?.msgContent?.conversation ??
-    b?.msgContent?.extendedTextMessage?.text ??
-    b?.message?.conversation ??
-    b?.message?.extendedTextMessage?.text ??
-    b?.text?.message ??
-    b?.body ??
-    b?.data?.message?.conversation;
-  const phone = String(
-    b?.sender?.id ?? b?.chat?.id ?? b?.phone ?? b?.from ?? b?.data?.key?.remoteJid ?? "",
-  )
-    .replace(/@.*/, "")
-    .replace(/\D/g, "");
-  if (!text || !phone) return null;
-  return { text: String(text).slice(0, 4000), phone };
-}
 
 export const Route = createFileRoute("/api/public/wapi/$secret")({
   server: {
@@ -57,9 +39,9 @@ export const Route = createFileRoute("/api/public/wapi/$secret")({
             request.json().catch(() => null),
             new Promise<null>((r) => setTimeout(() => r(null), 10_000)),
           ])) as Any;
-          const msg = extract(body);
+          const msg = extractIncoming(body);
           if (!msg) {
-            console.log("wapi skip: not a customer text", body?.event ?? body?.type ?? "");
+            console.log("wapi skip: not a customer message", body?.event ?? body?.type ?? "");
             return Response.json({ ok: true, skipped: true });
           }
           if (!cfg.bot_active) {
@@ -78,8 +60,10 @@ export const Route = createFileRoute("/api/public/wapi/$secret")({
           }
           const work = (async () => {
             try {
+              // Audio → transcript (`[áudio recebido: "…"]`) before anything else.
+              let userText = await resolveIncomingText(cfg as Cfg, msg);
               // "#iniciar" wipes this contact's memory so the agent starts the conversation from zero.
-              if (msg.text.trim().toLowerCase() === "#iniciar") {
+              if (userText.trim().toLowerCase() === "#iniciar") {
                 const { error } = await supabaseAdmin
                   .from("ai_memory")
                   .delete()
@@ -91,7 +75,7 @@ export const Route = createFileRoute("/api/public/wapi/$secret")({
                   .delete()
                   .eq("user_id", cfg.user_id)
                   .eq("phone", msg.phone);
-                msg.text = "Olá";
+                userText = "Olá";
               }
               // Frequency counter: +1 received message; audio resets it after send.
               const { data: cs } = await supabaseAdmin
@@ -125,14 +109,14 @@ export const Route = createFileRoute("/api/public/wapi/$secret")({
                 .reverse();
               const reply = await aiChat(cfg as Cfg, [
                 ...history,
-                { role: "user", content: msg.text },
+                { role: "user", content: userText },
               ]);
               await supabaseAdmin.from("ai_memory").insert([
-                { user_id: cfg.user_id, phone: msg.phone, role: "user", content: msg.text },
+                { user_id: cfg.user_id, phone: msg.phone, role: "user", content: userText },
                 { user_id: cfg.user_id, phone: msg.phone, role: "assistant", content: reply },
               ]);
 
-              const allowAudio = shouldAllowAudio(cfg as Cfg, msgCount, msg.text);
+              const allowAudio = shouldAllowAudio(cfg as Cfg, msgCount, userText);
               // Media URLs become native image/video BEFORE audio-mode transform,
               // so a gif/mp4 never gets spoken or sent as a clickable link.
               const parts = transformPartsForMode(

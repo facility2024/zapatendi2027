@@ -14,6 +14,9 @@ import {
   mediaKindForUrl,
   wapiSend,
   gifConverters,
+  extractIncoming,
+  resolveIncomingText,
+  transcribers,
   type Cfg,
 } from "@/lib/bot.server";
 
@@ -723,5 +726,98 @@ describe("normalizeMediaParts (media plays in WhatsApp, not as tab link)", () =>
     // rows are picked, so nothing new sends, but the call must resolve fast.
     expect(sent).toEqual([]);
     expect(Date.now() - t0).toBeLessThan(5_000);
+  });
+});
+
+describe("extractIncoming", () => {
+  const base = { sender: { id: "5511999999999" } };
+
+  it("keeps text and emoji-only messages", () => {
+    expect(extractIncoming({ ...base, msgContent: { conversation: "oi ❤️" } })?.text).toBe("oi ❤️");
+    expect(extractIncoming({ ...base, msgContent: { conversation: "😂😂" } })?.text).toBe("😂😂");
+  });
+
+  it("reads the nested message shape too", () => {
+    expect(extractIncoming({ ...base, message: { conversation: "oi" } })?.text).toBe("oi");
+  });
+
+  it("skips groups, fromMe and phoneless payloads", () => {
+    expect(extractIncoming({ ...base, isGroup: true, msgContent: { conversation: "oi" } })).toBe(
+      null,
+    );
+    expect(extractIncoming({ ...base, fromMe: true, msgContent: { conversation: "oi" } })).toBe(
+      null,
+    );
+    expect(extractIncoming({ msgContent: { conversation: "oi" } })).toBe(null);
+  });
+
+  it("marks images, with and without caption", () => {
+    const withCaption = extractIncoming({
+      ...base,
+      msgContent: { imageMessage: { caption: "olha isso" } },
+    });
+    expect(withCaption?.text).toBe("olha isso\n[imagem recebida]");
+    const bare = extractIncoming({ ...base, msgContent: { imageMessage: {} } });
+    expect(bare?.text).toBe("[imagem recebida]");
+  });
+
+  it("marks stickers", () => {
+    expect(
+      extractIncoming({ ...base, msgContent: { stickerMessage: { mimetype: "webp" } } })?.text,
+    ).toBe("[figurinha recebida]");
+  });
+
+  it("marks audio and flags it for transcription", () => {
+    const m = extractIncoming({
+      ...base,
+      messageId: "MSG1",
+      msgContent: { audioMessage: { ptt: true } },
+    });
+    expect(m?.text).toBe("[áudio recebido]");
+    expect(m?.needsTranscript).toBe(true);
+    expect(m?.messageId).toBe("MSG1");
+  });
+
+  it("does not flag audio without messageId (nothing to download)", () => {
+    const m = extractIncoming({ ...base, msgContent: { audioMessage: {} } });
+    expect(m?.text).toBe("[áudio recebido]");
+    expect(m?.needsTranscript).toBe(false);
+  });
+});
+
+describe("resolveIncomingText", () => {
+  it("swaps the audio marker for the transcript", async () => {
+    const spy = vi.spyOn(transcribers, "transcribe").mockResolvedValue("bom dia, tudo bem?");
+    const t = await resolveIncomingText({} as Cfg, {
+      text: "[áudio recebido]",
+      phone: "5511",
+      messageId: "M1",
+      needsTranscript: true,
+    });
+    expect(t).toBe('[áudio recebido: "bom dia, tudo bem?"]');
+    spy.mockRestore();
+  });
+
+  it("keeps the marker when transcription fails", async () => {
+    const spy = vi.spyOn(transcribers, "transcribe").mockResolvedValue(null);
+    const t = await resolveIncomingText({} as Cfg, {
+      text: "[áudio recebido]",
+      phone: "5511",
+      messageId: "M1",
+      needsTranscript: true,
+    });
+    expect(t).toBe("[áudio recebido]");
+    spy.mockRestore();
+  });
+
+  it("never calls transcription for non-audio messages", async () => {
+    const spy = vi.spyOn(transcribers, "transcribe");
+    const t = await resolveIncomingText({} as Cfg, {
+      text: "[figurinha recebida]",
+      phone: "5511",
+    });
+    expect(t).toBe("[figurinha recebida]");
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
   });
 });

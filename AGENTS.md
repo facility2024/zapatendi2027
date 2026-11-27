@@ -74,19 +74,36 @@ use the editor.
 - Local `.env` holds the new Supabase project's URL/keys (`dvwwqqhgdveusvczasbj`)
   including `SUPABASE_SERVICE_ROLE_KEY` — no Lovable Cloud injection; `.env` is
   gitignored, never commit or paste its values.
-- `src/lib/site.ts` hardcodes the published `PUBLIC_APP_URL`; the W-API
-  webhook must never point at a preview.
+- `src/lib/site.ts` resolves `PUBLIC_APP_URL` (env `VITE_PUBLIC_APP_URL` /
+  `PUBLIC_APP_URL`, else a hardcoded domain); the W-API webhook built from it
+  must never point at a preview.
 - shadcn/ui (new-york + lucide, Tailwind 4): primitives in
   `src/components/ui`, screens in `src/components/app`.
+- Build/deploy: `bun run build` (nitro preset `node-server`) emits
+  `.output/server/index.mjs`; the `Dockerfile` (Easypanel) runs it with Node 22
+  on `PORT` 3000. The runner image installs `ffmpeg`, which the bot needs at
+  runtime for GIF→MP4 conversion — tests never need it (converter is a swappable
+  seam in `bot.server.ts`).
+- `.env.production` is committed (public values only) and is the single source
+  of `VITE_*` at build time. Never add `ARG`/`ENV VITE_*` to the Dockerfile: an
+  empty ENV overrides the file and the client bundle silently loses its Supabase
+  config.
 
 ## Project rules
 
 - Each user's WhatsApp bot config lives in `bot_configs` (RLS by user_id); the webhook route `/api/public/wapi/$secret` finds the owner by the unguessable `webhook_secret`, so users never mix data.
 - Licenses are admin-only writes (RLS via has_role); the first account to sign up becomes admin.
-- AI replies use OpenAI-compatible chat endpoints for OpenAI, Grok and Gemini with the user's own key; media is emitted via [IMAGEM:]/[VIDEO:]/[AUDIO:]/[LINK:] tags parsed in bot.server.ts.
-- The W-API webhook answers immediately and runs AI + delivery inside request.waitUntil, because W-API holds later webhooks until the previous one is answered.
+- AI replies use OpenAI-compatible chat endpoints for OpenAI, Grok and Gemini with the user's own key; media is emitted via [IMAGEM:]/[GIF:]/[VIDEO:]/[AUDIO:]/[LINK:] tags parsed in bot.server.ts. `[IMAGEM: descrição]` without a URL generates an image when `bot_configs.image_gen` is on; GIFs are converted to MP4 (ffmpeg + Storage) before the W-API send, which rejects raw `.gif`.
+- The W-API webhook must answer immediately (W-API holds every later webhook
+  until the previous one returns); AI + delivery run in a detached `void work`
+  promise — there is **no** `waitUntil` on Easypanel/Node, and awaiting the work
+  before responding made the bot hang. Pre-response queries use 10s timeouts
+  and the outer catch always answers.
 - Anti-refusal filter in `bot.server.ts`: `isRefusal()` (PT/EN regex, >400 chars never counts) → one retry with the `REGRA ABSOLUTA` system suffix → second refusal throws, so nothing is sent or saved to `ai_memory`; old refusals are also filtered out of the history sent to the model (a stored refusal becomes a loop).
-- Outbound messages go through `message_queue` (per-conversation `batch_id`+`seq`, statuses pending→processing→sent/error): `enqueueReply` + `processMessageQueue` drain strictly in order with `gapMs()` between sends; a failed audio send cancels the rest of the batch; in-memory lock per `user_id:phone` prevents parallel drains. Restart-safe: pending rows resume on the next webhook.
+- Outbound messages go through `message_queue` (per-conversation `batch_id`+`seq`, statuses pending→processing→sent/error): `enqueueReply` + `processMessageQueue` drain strictly in order with `gapMs()` between sends; a failed audio send cancels the rest of the batch; in-memory lock per `user_id:phone` prevents parallel drains (a 180s drain
+  timeout releases a hung lock). Restart-safe: pending rows resume on the next
+  webhook.
 - Delivery settings live in `bot_configs`: `delay_enabled`/`delay_seconds` (fixed gap) fall back to legacy `delay_min`/`delay_max` random; `audio_mode` = `text` | `auto` | `frequency` (counter in `chat_state.msg_count`, reset when audio is sent; `allow_audio_request` lets the customer bypass it). Panel tab "Comunicação" + `testAiSequence` server fn simulate the timeline.
 - `parseReply` matches tags with a bracket-depth scan so Fish emotion marks (`[soft]`, `[pause]`…) nested inside `[AUDIO: …]` survive; `MEDIA_DIRECTIVE` tells the model they are allowed.
+- Incoming media from the customer is normalized by `extractIncoming` (`bot.server.ts`) into markers the prompt understands: `[figurinha recebida]`, `[imagem recebida]` (kept after a caption), `[áudio recebido]` → `resolveIncomingText` transcribes via W-API `download-media` + OpenAI whisper (`cfg.openai_key` / `OPENAI_API_KEY`; no key → marker kept, never blocks the webhook). Emojis are plain text and always worked.
 - Password recovery uses a public `/reset-password` route and a dedicated form that verifies a recovery session before updating credentials; keep ordinary signed-in sessions out of this recovery-only flow.

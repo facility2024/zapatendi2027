@@ -547,8 +547,11 @@ export function audioModeOf(cfg: Cfg): AudioMode {
   return cfg.audio_replies ? "auto" : "text";
 }
 
-/** Whether THIS reply may use audio (frequency counter + direct request). */
-export function shouldAllowAudio(cfg: Cfg, msgCount: number, userText: string): boolean {
+/** Whether THIS reply may use audio (frequency counter + direct request). */ export function shouldAllowAudio(
+  cfg: Cfg,
+  msgCount: number,
+  userText: string,
+): boolean {
   const mode = audioModeOf(cfg);
   if (mode === "text") return false;
   if (mode === "auto") return true;
@@ -572,6 +575,151 @@ export function transformPartsForMode(parts: Part[], cfg: Cfg, allowAudio: boole
   const toAudio = mode === "auto" || cfg.audio_replies || (mode === "frequency" && allowAudio);
   if (!toAudio) return parts;
   return parts.map((p) => (p.kind === "text" ? { kind: "audio", value: p.value } : p));
+}
+
+export type IncomingMsg = {
+  text: string;
+  phone: string;
+  messageId?: string;
+  needsTranscript?: boolean;
+};
+
+// W-API posts two payload shapes depending on plan/version: flat `msgContent`
+// or nested `message`. Type is intentionally loose — both are read.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type WapiAny = any;
+
+function mediaKindOf(mc: WapiAny, nested: WapiAny, typeFallback: unknown): string | null {
+  const has = (o: WapiAny, k: string) => o != null && typeof o[k] === "object";
+  if (has(mc, "stickerMessage") || has(nested, "stickerMessage")) return "sticker";
+  if (has(mc, "imageMessage") || has(nested, "imageMessage")) return "image";
+  if (has(mc, "audioMessage") || has(nested, "audioMessage")) return "audio";
+  const t = String(typeFallback ?? "").toLowerCase();
+  if (t.includes("sticker")) return "sticker";
+  if (t.includes("image") || t.includes("photo")) return "image";
+  if (t.includes("audio") || t.includes("ptt") || t.includes("voice")) return "audio";
+  return null;
+}
+
+/**
+ * Normalizes an incoming W-API webhook payload into text the model understands.
+ * Text/emoji pass through; sticker/image/audio become markers the prompt
+ * ("3A") tells the model how to answer. Returns null for anything skippable.
+ */
+export function extractIncoming(b: WapiAny): IncomingMsg | null {
+  if (!b || b.fromMe || b.data?.fromMe || b.key?.fromMe) return null;
+  if (b.isGroup || String(b.chat?.id ?? "").includes("@g.us")) return null;
+  const mc = b.msgContent ?? {};
+  const nested = b.message ?? {};
+  const text =
+    mc.conversation ??
+    mc.extendedTextMessage?.text ??
+    mc.imageMessage?.caption ??
+    nested.conversation ??
+    nested.extendedTextMessage?.text ??
+    nested.imageMessage?.caption ??
+    b.text?.message ??
+    b.body ??
+    b.data?.message?.conversation;
+  const phone = String(
+    b.sender?.id ?? b.chat?.id ?? b.phone ?? b.from ?? b.data?.key?.remoteJid ?? "",
+  )
+    .replace(/@.*/, "")
+    .replace(/\D/g, "");
+  if (!phone) return null;
+  const messageId = typeof b.messageId === "string" ? b.messageId : undefined;
+  const kind = mediaKindOf(mc, nested, b.type ?? b.data?.type);
+  const clean = typeof text === "string" ? text.slice(0, 4000).trim() : "";
+  if (clean) {
+    // An image WITH caption still counts as an image for the model.
+    return {
+      text: kind === "image" ? `${clean}\n[imagem recebida]` : clean,
+      phone,
+      messageId,
+    };
+  }
+  if (kind === "sticker") return { text: "[figurinha recebida]", phone, messageId };
+  if (kind === "image") return { text: "[imagem recebida]", phone, messageId };
+  if (kind === "audio")
+    return { text: "[áudio recebido]", phone, messageId, needsTranscript: !!messageId };
+  return null;
+}
+
+async function wapiDownloadMedia(
+  cfg: Cfg,
+  messageId: string,
+): Promise<{ data: ArrayBuffer; mimetype: string }> {
+  const base = (cfg.wapi_base_url || "https://api.w-api.app/v1").replace(/\/$/, "");
+  const res = await fetch(
+    `${base}/message/download-media?instanceId=${encodeURIComponent(cfg.wapi_instance_id)}`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${cfg.wapi_token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ messageId }),
+      signal: AbortSignal.timeout(30_000),
+    },
+  );
+  if (!res.ok) throw new Error(`W-API download-media ${res.status}`);
+  const j = (await res.json()) as { base64?: string; mimetype?: string };
+  if (!j?.base64) throw new Error("download-media sem base64");
+  const bin = Buffer.from(String(j.base64), "base64");
+  return {
+    data: bin.buffer.slice(bin.byteOffset, bin.byteOffset + bin.byteLength) as ArrayBuffer,
+    mimetype: String(j.mimetype || "audio/ogg"),
+  };
+}
+
+async function openaiTranscribe(
+  cfg: Cfg,
+  data: ArrayBuffer,
+  mimetype: string,
+): Promise<string | null> {
+  const key = cfg.openai_key || process.env["OPENAI_API_KEY"] || "";
+  if (!key) return null;
+  const ext = mimetype.includes("mp4")
+    ? "m4a"
+    : mimetype.includes("webm")
+      ? "webm"
+      : mimetype.includes("mpeg")
+        ? "mp3"
+        : "ogg";
+  const fd = new FormData();
+  fd.append("file", new Blob([data], { type: mimetype }), `audio.${ext}`);
+  fd.append("model", "whisper-1");
+  fd.append("language", "pt");
+  const res = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${key}` },
+    body: fd,
+    signal: AbortSignal.timeout(60_000),
+  });
+  if (!res.ok) {
+    console.error(`whisper ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    return null;
+  }
+  const j = (await res.json()) as { text?: string };
+  return String(j?.text ?? "").trim() || null;
+}
+
+/** W-API `download-media` → OpenAI whisper. No key/failure → null (marker kept). */
+export async function transcribeAudio(cfg: Cfg, messageId: string): Promise<string | null> {
+  try {
+    const { data, mimetype } = await wapiDownloadMedia(cfg, messageId);
+    return await openaiTranscribe(cfg, data, mimetype);
+  } catch (e) {
+    console.error("transcribe failed:", e instanceof Error ? e.message : e);
+    return null;
+  }
+}
+
+// Test seam: swap audio transcription without network.
+export const transcribers = { transcribe: transcribeAudio };
+
+/** Audio marker → `[áudio recebido: "…"]` when transcription succeeds. */
+export async function resolveIncomingText(cfg: Cfg, msg: IncomingMsg): Promise<string> {
+  if (!msg.needsTranscript || !msg.messageId) return msg.text;
+  const t = await transcribers.transcribe(cfg, msg.messageId);
+  return t ? `[áudio recebido: "${t.slice(0, 600)}"]` : msg.text;
 }
 
 // Per-conversation send chain: two webhooks for the same phone never send in parallel.
